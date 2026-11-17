@@ -223,7 +223,7 @@ function renderOverview() {
     $('issue-link').removeAttribute('target');
     $('issue-link').removeAttribute('rel');
   }
-  const replayed = run?.config_verified && !partial && rows.length > 0 && rows.every((row) => row.report_available);
+  const replayed = run?.artifact_verification?.csv_json_key_fields_match && run?.config_verified && !partial && rows.length > 0 && rows.every((row) => row.report_available);
   $('overview-source-note').textContent = replayed
     ? '完整明细与行情已取得；全部关键判定字段经独立复跑一致。原任务的复审状态单独保留。'
     : (run?.claimed_counts ? '卡片仅展示已取得明细；上方 BUY / WATCH / NO 数量来自任务汇总，独立复跑范围见验证说明。' : '卡片展示实际载入的股票明细。');
