@@ -58,21 +58,39 @@ def _symbol(value):
 
 
 def _config(value):
-    config = {key: _finite(value[key], key) for key in CONFIG_KEYS}
+    exit_mode = value.get("exit_mode", "fixed_percent")
+    if exit_mode not in ("structural", "fixed_percent"):
+        raise ValueError("invalid intraday exit mode")
+    if exit_mode == "structural" and any(value.get(key) is not None for key in CONFIG_KEYS[4:]):
+        raise ValueError("structural exits do not accept fixed percentages")
+    keys = CONFIG_KEYS[:4] if exit_mode == "structural" else CONFIG_KEYS
+    config = {key: _finite(value[key], key) for key in keys}
     if (config["initial_cash"] <= 0 or not 0 < config["risk_fraction"] <= 1
-            or not 0 <= config["fee_bps"] < 10000 or not 0 <= config["slippage_bps"] < 10000
-            or not 0 < config["stop_loss_pct"] < 1 or not 0 < config["take_profit_pct"] <= 10):
+            or not 0 <= config["fee_bps"] < 10000 or not 0 <= config["slippage_bps"] < 10000):
+        raise ValueError("invalid intraday account configuration")
+    if exit_mode == "structural":
+        config["exit_mode"] = exit_mode
+    elif not 0 < config["stop_loss_pct"] < 1 or not 0 < config["take_profit_pct"] <= 10:
         raise ValueError("invalid intraday account configuration")
     return config
 
 
-def _signal(value):
+def _signal(value, exit_mode="fixed_percent"):
     signal_day = date.fromisoformat(value["signal_date"]).isoformat()
     observed = value.get("observed_at")
-    return {"ticker": _symbol(value["ticker"]), "signal_date": signal_day,
-            "signal_id": str(value.get("signal_id") or f"{value['ticker']}:{signal_day}"),
-            "observed_at": _iso(_stamp(observed)) if observed is not None else None,
-            "source_run_id": value.get("source_run_id")}
+    signal = {"ticker": _symbol(value["ticker"]), "signal_date": signal_day,
+              "signal_id": str(value.get("signal_id") or f"{value['ticker']}:{signal_day}"),
+              "observed_at": _iso(_stamp(observed)) if observed is not None else None,
+              "source_run_id": value.get("source_run_id")}
+    if exit_mode == "structural":
+        stop = value.get("stop")
+        if isinstance(stop, bool) or not isinstance(stop, Real) or not math.isfinite(stop):
+            stop = None
+        target = value.get("target")
+        signal.update(stop=float(stop) if stop is not None else None,
+                      target=_finite(target, "target", positive=True) if target is not None else None,
+                      risk_plan=copy.deepcopy(value.get("risk_plan")))
+    return signal
 
 
 def _hash(value):
@@ -130,7 +148,8 @@ def _close(state, position, raw_price, bar, reason, now, fees, slip):
     state["trades"].append(trade)
     state["positions"].remove(position)
     _event(state, "exit", moment, now, signal_id=position["source_signal_id"], ticker=position["ticker"],
-           quantity=position["quantity"], price=price, fee=exit_fee, reason=reason, price_bar=bar)
+           quantity=position["quantity"], price=price, fee=exit_fee, reason=reason, price_bar=bar,
+           **({"risk_plan": position["risk_plan"]} if position.get("exit_mode") == "structural" else {}))
 
 
 def apply_intraday(signals, bars, *, now, config, state=None, started_at=None):
@@ -146,6 +165,7 @@ verify upstream that the signal itself used completed daily data.
     now_text = _iso(now_stamp)
     today = _day(now_stamp)
     config = _config(config)
+    exit_mode = config.get("exit_mode", "fixed_percent")
     if state is None:
         registration = _stamp(started_at) if started_at is not None else now_stamp
         if registration > now_stamp:
@@ -173,7 +193,7 @@ verify upstream that the signal itself used completed daily data.
         if len({b["timestamp"] for b in parsed}) != len(parsed):
             raise ValueError("duplicate intraday bar timestamp")
         normalized[ticker] = sorted(parsed, key=lambda b: b["timestamp"])
-    for value in sorted((_signal(v) for v in signals), key=lambda v: (v["signal_date"], v["ticker"], v["signal_id"])):
+    for value in sorted((_signal(v, exit_mode) for v in signals), key=lambda v: (v["signal_date"], v["ticker"], v["signal_id"])):
         if value["signal_date"] > today:
             continue
         identity = value["signal_id"]
@@ -183,12 +203,17 @@ verify upstream that the signal itself used completed daily data.
                 raise ValueError("signal_id already exists with different content")
             continue
         state["processed_signals"][identity] = fingerprint
-        order = {**value, "status": "pending", "reason": None, "entry_session": None,
-                 "exit_mode": "fixed_percent", "stop_loss_pct": config["stop_loss_pct"],
-                 "take_profit_pct": config["take_profit_pct"], "planned_rr": config["take_profit_pct"] / config["stop_loss_pct"]}
+        order = {**value, "status": "pending", "reason": None, "entry_session": None, "exit_mode": exit_mode}
+        if exit_mode == "fixed_percent":
+            order.update(stop_loss_pct=config["stop_loss_pct"], take_profit_pct=config["take_profit_pct"],
+                         planned_rr=config["take_profit_pct"] / config["stop_loss_pct"])
+        else:
+            order.update(planned_stop_pct=None, planned_target_pct=None, planned_rr=None)
         state["orders"].append(order)
         if value["observed_at"] is None:
             _skip(state, order, "missing_observed_at", now_text)
+        elif exit_mode == "structural" and (value["stop"] is None or value["stop"] <= 0):
+            _skip(state, order, "invalid_stop", now_text)
     reference = normalized.get("SPX", [])
     session_days = sorted({_day(_stamp(b["timestamp"])) for b in reference})
     reference_fresh = False
@@ -256,7 +281,7 @@ verify upstream that the signal itself used completed daily data.
             position["mark"] = value["open"]
             if value["open"] <= position["stop"]:
                 _close(state, position, value["open"], value, "stop_gap", now_text, fees, slip)
-            elif value["open"] >= position["target"]:
+            elif position["target"] is not None and value["open"] >= position["target"]:
                 _close(state, position, value["open"], value, "target_gap", now_text, fees, slip)
         for order in sorted(state["orders"], key=lambda o: (o["signal_date"], o["ticker"], o["signal_id"])):
             value = group.get(order["ticker"])
@@ -269,11 +294,17 @@ verify upstream that the signal itself used completed daily data.
                 _skip(state, order, "already_holding", now_text)
                 continue
             price = value["open"] * (1 + slip)
-            stop = price * (1 - config["stop_loss_pct"])
-            target = price * (1 + config["take_profit_pct"])
+            stop = price * (1 - config["stop_loss_pct"]) if exit_mode == "fixed_percent" else order["stop"]
+            target = price * (1 + config["take_profit_pct"]) if exit_mode == "fixed_percent" else order["target"]
             if stop >= value["open"]:
                 _skip(state, order, "invalid_stop", now_text)
                 continue
+            if target is not None and target <= price:
+                _skip(state, order, "target_at_or_below_entry", now_text)
+                continue
+            stop_pct = config["stop_loss_pct"] if exit_mode == "fixed_percent" else (price - stop) / price
+            target_pct = config["take_profit_pct"] if exit_mode == "fixed_percent" else (target / price - 1 if target is not None else None)
+            planned_rr = target_pct / stop_pct if target_pct is not None else None
             quantity = min(math.floor(_equity(state) * config["risk_fraction"] / (price - stop)),
                            math.floor(state["cash"] / (price * (1 + fees))))
             if quantity <= 0:
@@ -284,22 +315,29 @@ verify upstream that the signal itself used completed daily data.
             state["fees_paid"] += entry_fee
             position = {"ticker": order["ticker"], "quantity": quantity, "entry_price": price,
                         "entry_date": _day(_stamp(moment)), "entry_timestamp": moment, "entry_fee": entry_fee,
-                        "stop": stop, "target": target, "stop_loss_pct": config["stop_loss_pct"],
-                        "take_profit_pct": config["take_profit_pct"], "planned_rr": config["take_profit_pct"] / config["stop_loss_pct"],
-                        "exit_mode": "fixed_percent", "mark": price, "mark_date": _day(_stamp(moment)),
+                        "stop": stop, "target": target, "stop_loss_pct": stop_pct,
+                        "take_profit_pct": target_pct, "planned_rr": planned_rr,
+                        "exit_mode": exit_mode, "mark": price, "mark_date": _day(_stamp(moment)),
                         "mark_timestamp": moment, "stale": False, "source_signal_id": order["signal_id"],
                         "mark_session_end": value["session_end"], "source_run_id": order.get("source_run_id")}
+            if exit_mode == "structural":
+                position.update(planned_stop_pct=stop_pct, planned_target_pct=target_pct, risk_plan=order["risk_plan"])
             state["positions"].append(position)
             order["status"], order["reason"] = "filled", None
             order["entry_timestamp"], order["entry_price"] = moment, price
             order["stop"], order["target"] = stop, target
+            if exit_mode == "structural":
+                order.update(planned_stop_pct=stop_pct, planned_target_pct=target_pct, planned_rr=planned_rr)
             _event(state, "entry", moment, now_text, ticker=order["ticker"], signal_id=order["signal_id"],
-                   quantity=quantity, price=price, fee=entry_fee, price_bar=value)
+                   quantity=quantity, price=price, fee=entry_fee, price_bar=value,
+                   **({"risk_plan": order["risk_plan"], "stop": stop, "target": target, "exit_mode": exit_mode,
+                       "planned_rr": planned_rr} if exit_mode == "structural" else {}))
         for position in list(state["positions"]):
             value = group.get(position["ticker"])
             if value is None or value["volume"] <= 0:
                 continue
-            stop_hit, target_hit = value["low"] <= position["stop"], value["high"] >= position["target"]
+            stop_hit = value["low"] <= position["stop"]
+            target_hit = position["target"] is not None and value["high"] >= position["target"]
             if stop_hit:
                 _close(state, position, position["stop"], value, "stop_and_target" if target_hit else "stop", now_text, fees, slip)
             elif target_hit:
@@ -343,14 +381,15 @@ verify upstream that the signal itself used completed daily data.
                "stale_positions": sum(p["stale"] for p in state["positions"]),
                "win_rate": sum(t["net_pnl"] > 0 for t in state["trades"]) / len(state["trades"]) if state["trades"] else None}
     return {"state": state, "execution_model": "intraday_5m", "mode": "forward", "as_of": today,
-            "exit_mode": "fixed_percent", "stop_loss_pct": config["stop_loss_pct"], "take_profit_pct": config["take_profit_pct"],
-            "planned_rr": config["take_profit_pct"] / config["stop_loss_pct"], "start_date": state["start_date"],
+            "exit_mode": exit_mode, "stop_loss_pct": config.get("stop_loss_pct"), "take_profit_pct": config.get("take_profit_pct"),
+            "planned_rr": config["take_profit_pct"] / config["stop_loss_pct"] if exit_mode == "fixed_percent" else None, "start_date": state["start_date"],
             "started_at": state["started_at"], "last_checked_at": now_text, "data_as_of": latest, "data_stale": data_stale,
             "wallclock_age_seconds": (now_stamp - _stamp(latest)).total_seconds() if latest else None,
             "cash": state["cash"], "equity": equity, "config": config, "coverage_gaps": state["coverage_gaps"],
             **{key: state[key] for key in ("positions", "orders", "trades", "events", "equity_curve")}, "metrics": metrics,
             "assumptions": ["真实完整5分钟K线模拟，不是交易所逐笔成交", "BUY只在下一实际交易日首次登记后的K线开盘模拟入场",
-                            "登记前不补买；超过下一交易日的信号作废", "止损/目标按实际模拟入场价冻结",
+                            "登记前不补买；超过下一交易日的信号作废",
+                            "止损/目标取自信号日结构快照，成交后按实际价差计算仓位与RR；不自动放宽止损" if exit_mode == "structural" else "止损/目标按实际模拟入场价冻结",
                             "跳空按开盘，单根K线双触发先止损", "触发时刻仅精确到5分钟K线，保留核验批次截止时间与行情接收证据",
                             "持仓缺失中间K线暂停该标的，补齐后核对；不以之后的价格推测缺失区间",
                             "价差风险预算不包含跳空与费用；不含分红/拆股会计"]}

@@ -50,7 +50,11 @@ sudo systemctl list-timers multiedge-daily.timer
 
 `--enable-daily` performs the last activation step during deployment when those checks have already passed. The schedule is Monday–Friday at **18:30 America/New_York**, following U.S. daylight saving time. `Persistent=true` catches up a missed timer. The jobs layer must choose a completed session, handle market holidays and persist idempotent progress; the timer itself is not an exchange calendar. It performs research and Paper validation only.
 
-The daily scan automatically registers every baseline BUY in two separate fixed-exit accounts (3%/25% and 5%/25%), then reconciles their completed 5-minute bars. Existing structural accounts remain independent.
+The corrected default registers every baseline BUY in a structural-exit account, then reconciles its completed 5-minute bars. Initial stop/target levels come from the frozen signal report, rather than universal 3%/5% stops or a 25% target. The existing engine selects a structural stop using its MA/trendline/E1-anchor candidates and project-specific 0.1×ATR buffer; the buffer is an operational assumption, not an exact video prescription. Each risk plan retains its source report and anchor/date evidence, then computes risk distance, share quantity and RR from the actual simulated entry price. With no valid prior-high target, the account tracks the stop only and leaves target/RR unavailable.
+
+Fixed percentages remain optional, explicitly chosen experiments. The two previously automatic 3%/25% and 5%/25% example accounts must retain their original orders, fills and levels, with `automation_disabled=True` making them read-only and excluded from both daily enrollment and price-check advancement. A new structural account starts at actual registration; do not rewrite old trades or backfill new ones. Existing structural daily/replay accounts remain independent.
+
+The `5751f20`/195-test deployment receipt describes the earlier fixed-example release. The structural-default correction needs its own test, migration, browser and server acceptance receipts; do not treat the earlier result as proof that this correction is deployed.
 
 ## Five-minute Paper schedule
 
@@ -64,6 +68,8 @@ sudo systemctl list-timers multiedge-paper-monitor.timer
 ```
 
 `--enable-monitor` can activate it during later verified deployments. It runs every five minutes from 09:30 through 16:05 New York time on weekdays. `Persistent=false` avoids interpreting missed timer ticks as past executions; each successful check reconciles available completed bars after actual registration. Actual sessions, holidays, early closes and source freshness are checked against provider session metadata. Missing, stale or discontinuous quotes pause affected processing and appear in `last-paper-monitor.json` and account records. Normalized bars and source hashes are retained under `/var/lib/multiedge/intraday_quotes`; source exchange delay may be unknown. This is OHLC-based Paper simulation, with no brokerage connection.
+
+Five-minute checks execute the saved initial structural risk plan; they do not introduce an automatic trailing-stop or downward stop-reset rule. Continue the existing 18:30 New York daily close reconciliation. After deploying the correction, verify the new structural account, missing-target handling, and the disabled status of the two historical example accounts before recording acceptance.
 
 ## Inspect and roll back
 

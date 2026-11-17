@@ -501,13 +501,41 @@ function paperLedger(account) {
 function paperPlan(value, account = {}) {
   const config = value.config || account.config || {};
   const mode = value.exit_mode || account.exit_mode || config.exit_mode || 'structural';
-  const stop = value.planned_stop_pct ?? value.stop_loss_pct ?? account.stop_loss_pct ?? config.stop_loss_pct;
-  const target = value.planned_target_pct ?? value.take_profit_pct ?? account.take_profit_pct ?? config.take_profit_pct;
+  const risk = value.risk_plan || {};
+  const entry = numeric(value.entry_price) ? Number(value.entry_price) : null;
+  const reference = entry ?? (numeric(risk.report_close) ? Number(risk.report_close) : null);
+  const stopPrice = value.stop ?? risk.stop;
+  const targetPrice = value.target ?? risk.target;
+  const stop = mode === 'structural'
+    ? (numeric(reference) && Number(reference) > 0 && numeric(stopPrice) ? (Number(reference) - Number(stopPrice)) / Number(reference) : value.planned_stop_pct)
+    : value.planned_stop_pct ?? value.stop_loss_pct ?? account.stop_loss_pct ?? config.stop_loss_pct;
+  const target = mode === 'structural'
+    ? (numeric(reference) && Number(reference) > 0 && numeric(targetPrice) ? (Number(targetPrice) - Number(reference)) / Number(reference) : value.planned_target_pct)
+    : value.planned_target_pct ?? value.take_profit_pct ?? account.take_profit_pct ?? config.take_profit_pct;
   const rr = value.planned_rr ?? (numeric(stop) && Number(stop) > 0 && numeric(target) ? Number(target) / Number(stop) : null);
   const label = mode === 'fixed_percent'
-    ? `止损 ${numeric(stop) ? fmt(Number(stop) * 100) : '—'}% / 止盈 ${numeric(target) ? fmt(Number(target) * 100) : '—'}%`
+    ? `自定义比例 · 止损 ${numeric(stop) ? fmt(Number(stop) * 100) : '—'}% / 止盈 ${numeric(target) ? fmt(Number(target) * 100) : '—'}%`
     : '结构止损 / 前高目标';
-  return { mode, stop, target, rr, label };
+  return { mode, stop, target, rr, label, stopPrice, targetPrice, referenceLabel: entry === null ? '按信号收盘价' : '距模拟买入价' };
+}
+
+function paperRiskDetails(record) {
+  const risk = record.risk_plan;
+  if (!risk || risk.basis !== 'frozen_engine_structure') return null;
+  const details = node('details', 'paper-risk-details');
+  details.append(node('summary', '', '查看结构价位依据'));
+  const list = node('ul', 'evidence-list');
+  for (const text of [
+    `信号日 ${dateLabel(risk.signal_date)} · 收盘 ${money(risk.report_close)}`,
+    numeric(risk.stop_anchor) ? `E1 关键 K 线低点 ${money(risk.stop_anchor)} · ${risk.anchor_date ? dateLabel(risk.anchor_date) : '日期未提供'}` : 'E1 关键 K 线锚点未取得',
+    `均线区参考值 ${money(risk.ma_zone_level)} · 冻结趋势线 ${money(risk.trendline_level)}`,
+    Array.isArray(risk.mea_zone) && risk.mea_zone.length === 2 ? `MEA 汇合带 ${risk.mea_zone.map(money).join(' – ')}` : 'MEA 汇合带未提供',
+    `结构止损 ${money(risk.stop)}${numeric(risk.buffer_atr) ? ` · ${fmt(risk.buffer_atr)}×ATR 缓冲（项目操作化假设）` : ''}`,
+    numeric(risk.target) ? `前一波主要高点目标 ${money(risk.target)}` : '未取得有效前高目标；仅跟踪结构止损，R 不可评估',
+    `来源快照 ${risk.source_run_id || '未提供'}${risk.source_revision ? ` · 规则 ${risk.source_revision}` : ''}`,
+  ]) list.append(node('li', '', text));
+  details.append(list);
+  return details;
 }
 
 function paperTime(value) {
@@ -536,26 +564,22 @@ function renderPaperFormPlan() {
   $('paper-percent-fields').hidden = !fixed;
   for (const name of ['stop_loss_percent', 'take_profit_percent']) form.elements[name].disabled = !fixed;
   $('paper-plan-preview').textContent = !fixed
-    ? '沿用信号中的结构止损与前高目标；实际模拟成交后保留冻结价位及计划盈亏比。'
+    ? '逐股读取信号日的关键 K 线与结构价位；成交后计算实际风险距离、目标空间与 R。无有效前高时，仅跟踪结构止损。'
     : stop > 0 && target > 0
-      ? `按实际模拟买入价设置止损 ${fmt(stop)}%、止盈 ${fmt(target)}%，计划盈亏比约 ${fmt(target / stop)}R，未扣费用与滑点。`
+      ? `自定义实验：按模拟买入价设置止损 ${fmt(stop)}%、止盈 ${fmt(target)}%，计划约 ${fmt(target / stop)}R，未扣成本。这组比例不是视频的通用规则。`
       : '填写有效的止损距离和止盈目标后，显示计划盈亏比。';
-  document.querySelectorAll('[data-paper-stop]').forEach((button) => {
-    const active = fixed && Number(button.dataset.paperStop) === stop && target === 25;
-    button.classList.toggle('active', active);
-    button.setAttribute('aria-pressed', String(active));
-  });
 }
 
 function renderPaperAccounts() {
-  const accounts = workspace.paper_accounts || [];
+  const priority = (account) => account.automation_disabled ? 2 : (paperPlan(account).mode === 'structural' && (account.execution_model || account.config?.execution_model) === 'intraday_5m' ? 0 : 1);
+  const accounts = [...(workspace.paper_accounts || [])].sort((a, b) => priority(a) - priority(b));
   const selected = selectedPaper?.account_id || $('paper-account-select').value;
   $('paper-account-select').replaceChildren();
   for (const account of accounts) {
     const data = paperLedger(account);
     const profile = (workspace.profiles || []).find((item) => (item.id || item.profile_id) === data.profile_id);
     const strategy = data.profile_id ? (configOf(profile).name || '独立指标实验') : '原始策略';
-    const option = node('option', '', `${humanStatus(data.mode)} · ${strategy} · ${paperPlan(data).label} · ${data.as_of || data.created_at?.slice(0, 10) || data.account_id}`);
+    const option = node('option', '', `${data.automation_disabled ? '已停用 · 旧示例记录' : humanStatus(data.mode)} · ${strategy} · ${paperPlan(data).label} · ${data.as_of || data.created_at?.slice(0, 10) || data.account_id}`);
     option.value = account.account_id;
     $('paper-account-select').append(option);
   }
@@ -577,12 +601,12 @@ function renderPaper() {
     ? '成交后显示冻结的止损、止盈与实际执行记录。'
     : plan.mode === 'fixed_percent'
       ? `计划盈亏比约 ${fmt(plan.rr)}R，未扣费用与滑点。BUY 登记后等待符合条件的真实行情；以模拟买入价冻结止损与止盈，按后续股价验证出场。`
-      : '保留原始信号的结构止损与前高目标。每笔实际模拟成交及冻结价位在下方单独记录。';
+      : '每只股票使用信号日的关键 K 线与结构参考位，按实际模拟买入价计算风险距离和 R。无有效前高时仅跟踪结构止损；下方可查看每笔价位依据。';
   const execution = data.execution_model || data.config?.execution_model;
   const monitor = data.monitor || {};
   const quoteSources = Object.entries(monitor.quote_sources || {});
   const monitoring = [];
-  if (selectedPaper) monitoring.push(execution === 'intraday_5m' ? '盘中每 5 分钟检查（真实 5 分钟 K 线模拟）' : '日线 OHLC 模拟');
+  if (selectedPaper) monitoring.push(data.automation_disabled ? '旧示例已停用 · 仅查看保留的账本' : execution === 'intraday_5m' ? '盘中每 5 分钟检查（真实 5 分钟 K 线模拟）' : '日线 OHLC 模拟');
   if (monitor.last_checked_at || data.last_checked_at) monitoring.push(`最近检查 ${paperTime(monitor.last_checked_at || data.last_checked_at)}（北京时间）`);
   if (data.data_as_of) monitoring.push(`行情截至 ${paperTime(data.data_as_of)}`);
   if (quoteSources.length) {
@@ -593,25 +617,29 @@ function renderPaper() {
   $('paper-equity').textContent = money(data.equity);
   $('paper-cash').textContent = money(data.cash);
   $('paper-counts').textContent = selectedPaper ? `${positions.length} / ${trades.length}` : '—';
-  $('paper-mode-note').textContent = selectedPaper ? humanStatus(data.mode) : '等待验证账户';
-  $('paper-as-of').textContent = data.data_as_of ? `行情截至 ${paperTime(data.data_as_of)}` : '尚未取得估值行情';
+  $('paper-mode-note').textContent = selectedPaper ? (data.automation_disabled ? '已停用 · 历史快照' : humanStatus(data.mode)) : '等待验证账户';
+  $('paper-as-of').textContent = data.data_as_of ? `${data.automation_disabled ? '保留快照截至' : '行情截至'} ${paperTime(data.data_as_of)}` : '尚未取得估值行情';
   const gaps = [];
+  if (data.automation_disabled) gaps.push(data.legacy_reason || '此旧示例已停用，历史价格、规则与成交保留原样；不会新增信号或自动推进');
   if (data.data_missing?.length) gaps.push(`行情缺失：${data.data_missing.join('、')}`);
   if (data.data_stale) gaps.push(`行情未通过时效检查${data.data_as_of ? `（最新 ${paperTime(data.data_as_of)}）` : ''}`);
   for (const [ticker, error] of Object.entries(monitor.errors || {})) gaps.push(`${ticker} 行情检查失败：${error}`);
   if (selectedPaper && !positions.length && !trades.length) gaps.push('尚无模拟成交记录，当前资金不代表策略验证收益');
   $('paper-data-note').hidden = !gaps.length;
   $('paper-data-note').textContent = gaps.join('。');
-  $('paper-position-note').textContent = `${positions.length} 只持仓`;
+  $('paper-position-note').textContent = `${positions.length} 只持仓${data.automation_disabled ? ' · 停用时快照' : ''}`;
   $('paper-positions-body').replaceChildren();
   for (const position of positions) {
     const tr = node('tr');
     const positionPlan = paperPlan(position, data);
     const status = node('td');
-    status.append(badge(position.stale ? '估值过期' : (position.mark_timestamp || position.mark_time || position.mark_at || position.mark_date ? '有估值' : '等待估值'), position.stale ? 'amber' : 'muted'));
+    status.append(badge(data.automation_disabled ? '历史快照' : position.stale ? '估值过期' : (position.mark_timestamp || position.mark_time || position.mark_at || position.mark_date ? '有估值' : '等待估值'), position.stale || data.automation_disabled ? 'amber' : 'muted'));
     const stopNote = numeric(positionPlan.stop) ? `距买入价 ${fmt(Number(positionPlan.stop) * 100)}%` : '结构止损';
-    const targetNote = numeric(positionPlan.target) ? `距买入价 ${fmt(Number(positionPlan.target) * 100)}%` : '前高目标';
-    tr.append(paperTickerCell(position), paperPriceCell(position.entry_price, position.entry_timestamp || position.entry_time || position.entry_at || position.entry_date), paperPriceCell(position.mark, position.mark_timestamp || position.mark_time || position.mark_at || position.mark_date), paperPriceCell(position.stop, null, stopNote), paperPriceCell(position.target, null, targetNote), node('td', '', numeric(positionPlan.rr) ? `${fmt(positionPlan.rr)}R` : '未提供'), status);
+    const targetNote = numeric(positionPlan.target) ? `距买入价 ${fmt(Number(positionPlan.target) * 100)}%` : '未取得有效前高 · 仅跟踪止损';
+    const stopCell = paperPriceCell(position.stop, null, stopNote);
+    const riskDetails = paperRiskDetails(position);
+    if (riskDetails) stopCell.append(riskDetails);
+    tr.append(paperTickerCell(position), paperPriceCell(position.entry_price, position.entry_timestamp || position.entry_time || position.entry_at || position.entry_date), paperPriceCell(position.mark, position.mark_timestamp || position.mark_time || position.mark_at || position.mark_date), stopCell, paperPriceCell(position.target, null, targetNote), node('td', '', numeric(positionPlan.rr) ? `${fmt(positionPlan.rr)}R` : '不可评估'), status);
     $('paper-positions-body').append(tr);
   }
   $('paper-positions-empty').hidden = positions.length > 0;
@@ -622,6 +650,9 @@ function renderPaper() {
     const levels = node('td', 'paper-price-cell', `${money(trade.stop)} / ${money(trade.target)}`);
     const tradePlan = paperPlan(trade, data);
     levels.append(node('small', 'check-detail', `${tradePlan.label}${numeric(tradePlan.rr) ? ` · ${fmt(tradePlan.rr)}R` : ''}`));
+    if (!numeric(trade.target)) levels.append(node('small', 'check-detail', '未取得有效前高 · 仅跟踪结构止损'));
+    const riskDetails = paperRiskDetails(trade);
+    if (riskDetails) levels.append(riskDetails);
     const reason = trade.exit_reason || '未提供';
     const pnl = node('td', numeric(trade.net_pnl) ? (Number(trade.net_pnl) >= 0 ? 'positive' : 'negative') : '', money(trade.net_pnl));
     tr.append(paperTickerCell(trade), paperPriceCell(trade.entry_price, trade.entry_timestamp || trade.entry_time || trade.entry_at || trade.entry_date), paperPriceCell(trade.exit_price, trade.exit_timestamp || trade.exit_time || trade.exit_at || trade.exit_date), levels, node('td', 'cell-note', paperLabels[reason] || reason), node('td', '', `${money(trade.entry_fee)} / ${money(trade.exit_fee)}`), pnl);
@@ -633,13 +664,18 @@ function renderPaper() {
   $('paper-events-body').replaceChildren();
   for (const event of events.slice(-100).reverse()) {
     const tr = node('tr');
+    const sourceOrder = (data.orders || []).find((order) => order.signal_id === (event.signal_id || event.source_signal_id));
+    const record = { ...sourceOrder, ...event, risk_plan: event.risk_plan || sourceOrder?.risk_plan };
     const detail = event.reason || event.exit_reason || event.message || event.description || event.note || (event.status === 'pending' ? '等待符合成交条件的后续行情' : '');
     const kind = event.status || event.action || event.kind || event.type || event.side || '记录';
-    const eventPlan = paperPlan(event, data);
+    const eventPlan = paperPlan(record, data);
     const detailText = event.status === 'pending'
-      ? `${paperLabels[detail] || detail}。${eventPlan.label}${numeric(eventPlan.rr) ? ` · ${fmt(eventPlan.rr)}R` : ''}；模拟成交后显示冻结价位。${event.signal_date ? `信号日 ${dateLabel(event.signal_date)}。` : ''}`
+      ? `${paperLabels[detail] || detail}。${eventPlan.label}${eventPlan.mode === 'structural' ? `：止损 ${money(eventPlan.stopPrice)} / 目标 ${numeric(eventPlan.targetPrice) ? money(eventPlan.targetPrice) : '不可得，仅跟踪止损'}` : ''}${numeric(eventPlan.rr) ? ` · ${eventPlan.referenceLabel}约 ${fmt(eventPlan.rr)}R，未扣成本` : ' · R 不可评估'}。${event.signal_date ? `信号日 ${dateLabel(event.signal_date)}。` : ''}`
       : paperLabels[detail] || detail;
-    tr.append(node('td', '', paperTime(event.timestamp || event.exit_timestamp || event.entry_timestamp || event.exit_time || event.entry_time || event.date || event.exit_at || event.exit_date || event.as_of || event.observed_at || event.signal_date)), node('td', 'ticker-cell', event.ticker || '—'), node('td', '', paperLabels[kind] || kind), node('td', '', event.status === 'pending' ? '等待模拟成交' : `${fmt(event.quantity)} / ${money(event.price ?? event.fill_price ?? event.exit_price)}`), node('td', 'cell-note', detailText));
+    const detailCell = node('td', 'cell-note', detailText);
+    const riskDetails = paperRiskDetails(record);
+    if (riskDetails) detailCell.append(riskDetails);
+    tr.append(node('td', '', paperTime(event.timestamp || event.exit_timestamp || event.entry_timestamp || event.exit_time || event.entry_time || event.date || event.exit_at || event.exit_date || event.as_of || event.observed_at || event.signal_date)), node('td', 'ticker-cell', event.ticker || '—'), node('td', '', paperLabels[kind] || kind), node('td', '', event.status === 'pending' ? '等待模拟成交' : `${fmt(event.quantity)} / ${money(event.price ?? event.fill_price ?? event.exit_price)}`), detailCell);
     $('paper-events-body').append(tr);
   }
   $('paper-events-empty').hidden = events.length > 0;
@@ -660,6 +696,8 @@ function renderPaper() {
   if (selectedPaper) {
     assumptions.append(node('p', '', `手续费 ${fmt(data.config?.fee_bps)} bps · 滑点 ${fmt(data.config?.slippage_bps)} bps · 账户每笔风险预算 ${numeric(data.config?.risk_fraction) ? `${fmt(data.config.risk_fraction * 100)}%` : '未提供'}`));
     assumptions.append(node('p', '', `出场方案：${plan.label}${numeric(plan.rr) ? ` · 计划盈亏比 ${fmt(plan.rr)}R，未扣费用与滑点` : ''}`));
+    if (plan.mode === 'structural') assumptions.append(node('p', '', '逐股识别初始结构价位，保存信号时的依据。入场后保留当时的止损与目标；后续移动止损需要明确规则与独立版本。目标缺失时 R 不可评估，当前仅跟踪结构止损。'));
+    if (data.automation_disabled) assumptions.append(node('p', '', `旧示例已停用：${data.legacy_reason || '仅保留原账本，不新增或推进自动交易。'}`));
     if (execution === 'intraday_5m') assumptions.append(node('p', '', '前向记录使用已结束的真实 5 分钟 K 线。BUY 登记后，从符合条件的后续行情开始模拟；行情可能延迟，检查时间与行情时间分别保留。'));
     const basis = { unadjusted: execution === 'intraday_5m' ? '未复权 5 分钟 K 线' : '未复权日线', adjusted: execution === 'intraday_5m' ? '复权 5 分钟 K 线' : '复权日线' }[data.price_basis] || data.price_basis || '口径未提供';
     const provider = { marketwatch: 'MarketWatch', yahoo: 'Yahoo Finance' }[data.provider_id] || data.provider_id || '来源未提供';
@@ -990,13 +1028,6 @@ $('paper-form').addEventListener('submit', async (event) => {
 });
 $('paper-exit-mode').addEventListener('change', renderPaperFormPlan);
 for (const name of ['stop_loss_percent', 'take_profit_percent']) $('paper-form').elements[name].addEventListener('input', renderPaperFormPlan);
-document.querySelectorAll('[data-paper-stop]').forEach((button) => {
-  button.addEventListener('click', () => {
-    $('paper-form').elements.stop_loss_percent.value = button.dataset.paperStop;
-    $('paper-form').elements.take_profit_percent.value = '25';
-    renderPaperFormPlan();
-  });
-});
 $('paper-account-select').addEventListener('change', async () => {
   const id = $('paper-account-select').value;
   if (!id) return;

@@ -84,31 +84,31 @@
         </section>
 
         <section id="view-paper" class="view" aria-label="Paper 验证" hidden>
-          <div class="notice neutral-notice"><span aria-hidden="true">◎</span><p><strong>BUY 信号自动进入 Paper，按真实行情验证出场。</strong>系统分别记录“3% 止损 / 25% 止盈”和“5% 止损 / 25% 止盈”两组方案。历史回放与前向 Paper 独立记账，成交与估值保留实际行情时间。</p></div>
+          <div class="notice neutral-notice"><span aria-hidden="true">◎</span><p><strong>BUY 信号自动进入 Paper，按各股结构确定出场价。</strong>止损参考关键 K 线低点与多边缘支撑带下方，第一目标参考前一波主要高点。价格距离和盈亏比由每只股票的实际价位决定；历史回放与前向 Paper 独立记账。</p></div>
           <article class="panel paper-thesis">
-            <div class="panel-heading"><div><p class="eyebrow">SMALL RISK · LARGER POTENTIAL</p><h2>先定义能承受的损失，再观察收益能否走出来</h2></div><span class="subtle-label">视频举例的验证假设</span></div>
+            <div class="panel-heading"><div><p class="eyebrow">STRUCTURE DEFINES THE RISK</p><h2>先找到交易失效的位置，再衡量上方空间</h2></div><span class="subtle-label">每只股票，按结构定价</span></div>
             <div class="paper-scenarios">
-              <div class="paper-scenario"><span>方案 A · 止损 3%</span><strong>3% <i>→</i> 25%</strong><p>假设买入价 $100，止损 $97，止盈 $125</p><small>计划盈亏比约 <b>8.33R</b>，未扣费用与滑点</small></div>
-              <div class="paper-scenario"><span>方案 B · 止损 5%</span><strong>5% <i>→</i> 25%</strong><p>假设买入价 $100，止损 $95，止盈 $125</p><small>计划盈亏比 <b>5R</b>，未扣费用与滑点</small></div>
+              <div class="paper-scenario paper-structure"><span>先看下方 · 什么位置跌破后，买入理由失效？</span><strong>关键 K 线与支撑带</strong><p>参考突破 K 线低点、均线区和冻结趋势线，在近端结构带下方留出缓冲。</p><small>止损价先由结构确定，再计算距实际模拟买入价的风险距离。</small></div>
+              <div class="paper-scenario paper-structure"><span>再看上方 · 已有结构提供了多少空间？</span><strong>前一波主要高点</strong><p>以前期已确认的主要 swing high 作为首个目标，结合实际买入价计算目标空间与 R。</p><small>无有效前高时显示目标与 R 不可评估，仅跟踪结构止损。</small></div>
             </div>
-            <ol class="paper-flow"><li><span>01</span><div><strong>BUY 自动入队</strong><p>保留信号与登记时间</p></div></li><li><span>02</span><div><strong>满足条件后模拟买入</strong><p>从实际买入价冻结止损、止盈</p></div></li><li><span>03</span><div><strong>跟踪真实股价</strong><p>触及出场条件后模拟卖出</p></div></li><li><span>04</span><div><strong>逐笔留证与复盘</strong><p>记录价格、原因、费用和净损益</p></div></li></ol>
-            <p class="form-help">25% 是用于验证的目标，不是预期承诺。3% / 5% 是单只股票相对买入价的止损距离；账户每笔风险预算默认是权益的 0.35%，用于决定买多少股。跳空和成交成本可能使实际结果偏离计划。</p>
+            <p class="paper-reference">Google 案例 · 2025-08-01：信号收盘 $189.13，参考 7/21 K 线低点 $186.15；系统结构止损 $184.91、前高目标 $207.05，信号时约 4.25R。<a class="text-link" href="https://www.youtube.com/watch?v=Js0pAyftVOs&amp;t=2693" target="_blank" rel="noopener noreferrer">视频 44:53–47:05 ↗</a></p>
+            <ol class="paper-flow"><li><span>01</span><div><strong>BUY 自动入队</strong><p>保留信号、结构与登记时间</p></div></li><li><span>02</span><div><strong>校验买入与结构价位</strong><p>按实际风险距离计算仓位</p></div></li><li><span>03</span><div><strong>每 5 分钟检查行情</strong><p>触及已登记价位后模拟卖出</p></div></li><li><span>04</span><div><strong>逐笔留证与复盘</strong><p>记录锚点、价格、费用和净损益</p></div></li></ol>
+            <p class="form-help">3%／5% 止损和 25% 收益是视频中的举例，不是统一规则。冻结引擎在近端结构参考值下方留 0.1×ATR 缓冲，这是项目的操作化假设。每笔保留入场时的结构版本与价位；账户每笔默认 0.35% 的风险预算用于定仓，跳空与成本可能超出预算。</p>
           </article>
           <div class="paper-layout">
             <form id="paper-form" class="panel setup-panel">
               <div class="panel-heading"><div><p class="eyebrow">PAPER SETUP</p><h2>配置独立验证账户</h2></div></div>
               <label>验证方式<select name="mode"><option value="forward">前向 Paper · 从现在开始记录</option><option value="replay">历史回放 · 检查历史规则</option></select></label>
               <label>验证策略<select name="profile_id" id="paper-profile-select"><option value="">原始策略 · 冻结基线</option></select></label>
-              <label>出场方案<select name="exit_mode" id="paper-exit-mode"><option value="fixed_percent">固定比例 · 止损 / 止盈</option><option value="structural">原始结构 · 结构止损 / 前高目标</option></select></label>
-              <div id="paper-percent-fields">
-                <div class="paper-presets" role="group" aria-label="视频示例方案"><button class="filter-button active" type="button" data-paper-stop="3" aria-pressed="true">3% / 25%</button><button class="filter-button" type="button" data-paper-stop="5" aria-pressed="false">5% / 25%</button></div>
+              <label>出场方案<select name="exit_mode" id="paper-exit-mode"><option value="structural">结构止损 / 前高目标 · 自动方案</option><option value="fixed_percent">自定义比例实验</option></select></label>
+              <div id="paper-percent-fields" hidden>
                 <div class="form-grid"><label>股价止损距离（%）<input name="stop_loss_percent" type="number" min="0.1" max="99" step="0.1" value="3" required></label><label>股价止盈目标（%）<input name="take_profit_percent" type="number" min="0.1" max="1000" step="0.1" value="25" required></label></div>
               </div>
-              <p class="paper-plan-preview" id="paper-plan-preview">按实际模拟买入价设置止损 3%、止盈 25%，计划盈亏比约 8.33R。</p>
+              <p class="paper-plan-preview" id="paper-plan-preview">逐股读取已登记的结构止损与前高目标，成交后计算实际风险距离和盈亏比。</p>
               <label>初始资金（USD）<input name="initial_cash" type="number" min="100" max="100000000" step="100" value="100000" required></label>
               <div class="form-grid"><label>账户每笔风险预算（%）<input name="risk_percent" type="number" min="0.01" max="5" step="0.01" value="0.35" required></label><label>手续费（bps）<input name="fee_bps" type="number" min="0" max="1000" step="1" value="5" required></label></div>
               <label>滑点（bps）<input name="slippage_bps" type="number" min="0" max="1000" step="1" value="5" required></label>
-              <p class="form-help">默认两组自动账户由系统维护；这里可另建参数版本。仓位按账户风险预算与止损距离计算。等待、缺行情或不可成交时会保留原因。</p>
+              <p class="form-help">默认结构账户由系统维护，前向记录每 5 分钟检查真实行情；这里可另建独立实验。仓位按风险预算与实际止损距离计算。缺少有效目标时，仅跟踪结构止损；等待、缺行情或价位失效时保留原因。</p>
               <button class="primary-button full-width" type="submit">建立 Paper 验证 <span aria-hidden="true">↗</span></button>
               <p id="paper-form-status" class="form-status" role="status"></p>
             </form>

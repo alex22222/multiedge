@@ -72,10 +72,10 @@ def test_new_forward_account_cannot_fill_old_saved_signal(tmp_path, monkeypatch)
     run["imported_at"] = "2025-08-01T22:00:00+00:00"
     service.store.save_run(run)
     monkeypatch.setattr("multiedge.dashboard.utc_now", lambda: "2025-08-08T22:00:00+00:00")
-    result = service.paper(run["run_id"], mode="forward")
+    result = service.paper(run["run_id"], mode="forward", execution_model="daily_ohlc")
     assert result["positions"] == [] and result["trades"] == []
     assert result["orders"][0]["reason"] == "signal_observed_after_entry"
-    again = service.paper(run["run_id"], mode="forward")
+    again = service.paper(run["run_id"], mode="forward", execution_model="daily_ohlc")
     assert again["orders"] == result["orders"]
 
 

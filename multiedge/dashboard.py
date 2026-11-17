@@ -11,13 +11,34 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from .data import load_daily
+from .config import Config
 from .engine import Report
 from .experiments import ExperimentConfig, evaluate_experiment
 from .paper import run_paper
 from .report import render_snapshot
 from .research import BASELINE_REVISION, ResearchStore, digest, load_prices, utc_now, validate_ticker
 
-VIDEO_PAPER_PLANS = ((.03, .25), (.05, .25))
+def _intraday_config(config):
+    result = {k: config[k] for k in ("initial_cash", "risk_fraction", "fee_bps", "slippage_bps")}
+    if config.get("exit_mode", "structural") == "structural":
+        result["exit_mode"] = "structural"
+    else:
+        result.update({k: config[k] for k in ("stop_loss_pct", "take_profit_pct")})
+    return result
+
+
+def _structural_plan(run, report):
+    edges = report.get("edges", {})
+    markers = (report.get("chart") or {}).get("markers", {})
+    return {"basis": "frozen_engine_structure", "source_run_id": run["run_id"],
+            "signal_date": run["as_of"], "source_revision": run.get("engine_revision"),
+            "report_close": report.get("close"), "stop": report.get("stop"), "target": report.get("target"),
+            "stop_anchor": report.get("stop_anchor"), "anchor_date": markers.get("anchor_bar"),
+            "ma_zone_level": edges.get("ma_zone", {}).get("level"),
+            "trendline_level": edges.get("trendline", {}).get("level"),
+            "trendline_frozen": report.get("trendline_frozen"), "mea_zone": report.get("mea_zone"),
+            "buffer_atr": Config().stop_buffer_atr if run.get("engine_revision") == BASELINE_REVISION else None,
+            "target_basis": "信号日已确认的上一波主要前高；无有效前高时仅跟踪结构止损"}
 
 
 def latest_complete_date(now=None):
@@ -78,7 +99,7 @@ class ResearchService:
                 "validation": validation,
                 "last_job": json.loads(job_file.read_text()) if job_file.exists() else None,
                 "paper_automation": {"execution_model": "intraday_5m", "interval_seconds": 300,
-                                     "plans": [{"stop_loss_pct": s, "take_profit_pct": t, "planned_rr": t / s} for s, t in VIDEO_PAPER_PLANS],
+                                     "exit_mode": "structural", "basis": "逐股采用信号日结构止损与前高目标；百分比由实际成交价计算",
                                      "monitor": json.loads(monitor_file.read_text()) if monitor_file.exists() else {"status": "not_run"}},
                 "baseline": {"revision": BASELINE_REVISION, "ticker": "GOOGL", "as_of": "2025-08-01", "verdict": "BUY", "trendline": 185.33, "sr_flip": 184.33, "stop": 184.91, "target": 207.05, "rr": 4.25},
                 "methodology": ["七项边缘评分并用硬门槛交集判定", "认知/直觉证据独立记录，技术代理不等于真实催化剂", "历史回放与前向Paper账户独立", "收盘信号下一交易日开盘，迟到导入不回填", "同日止损和目标双触发先止损；费用与滑点独记", "RSI Wilder；MACD EMA adjust=False，MACD高于信号线是状态规则", "未复权日线，不包含分红与拆股总回报", "自定义实验有独立版本，不覆写原始规则"]}
@@ -124,7 +145,7 @@ class ResearchService:
         if now.tzinfo is None:
             raise ValueError("盘中检查时间必须带时区")
         local = now.astimezone(ZoneInfo("America/New_York"))
-        accounts = [a for a in self.store.papers() if a.get("execution_model") == "intraday_5m"
+        accounts = [a for a in self.store.papers() if a.get("execution_model") == "intraday_5m" and not a.get("automation_disabled")
                     and (a.get("positions") or any(o["status"] == "pending" for o in a.get("orders", [])))]
         receipt = {"last_checked_at": now.isoformat(), "execution_model": "intraday_5m", "accounts": [], "errors": {}}
         if not accounts:
@@ -140,13 +161,15 @@ class ResearchService:
             fcntl.flock(lock, fcntl.LOCK_EX)
             for summary in accounts:
                 account = self.store.get_paper(summary["account_id"])
+                if account.get("automation_disabled"):
+                    continue
                 saved_check = account["state"].get("last_checked_at")
                 if saved_check and datetime.fromisoformat(saved_check.replace("Z", "+00:00")) > now:
                     receipt["accounts"].append({"account_id": account["account_id"], "positions": len(account["positions"]),
                                                 "trades": len(account["trades"]), "status": "superseded"})
                     continue
                 config = account["config"]
-                ledger_config = {k: config[k] for k in ("initial_cash", "risk_fraction", "fee_bps", "slippage_bps", "stop_loss_pct", "take_profit_pct")}
+                ledger_config = _intraday_config(config)
                 watched = {p["ticker"] for p in account.get("positions", [])} | {o["ticker"] for o in account.get("orders", []) if o["status"] == "pending"}
                 bars = {t: b for t, b in quotes["bars"].items() if t in watched or t == "SPX"}
                 errors = {t: e for t, e in quotes["errors"].items() if t in watched or t == "SPX"}
@@ -191,21 +214,25 @@ class ResearchService:
             if not 0 < stop_loss_pct < 1 or not 0 < take_profit_pct <= 10:
                 raise ValueError("止损比例须在0到100%之间，止盈须大于0且不超过1000%")
             config.update({"exit_mode": exit_mode, "stop_loss_pct": stop_loss_pct, "take_profit_pct": take_profit_pct})
+        elif stop_loss_pct is not None or take_profit_pct is not None:
+            raise ValueError("结构出场方案不接受固定百分比参数")
+        execution_model = execution_model or ("intraday_5m" if mode == "forward" else "daily_ohlc")
+        if execution_model not in ("intraday_5m", "daily_ohlc") or (execution_model == "intraday_5m" and mode != "forward"):
+            raise ValueError("盘中模型仅支持前向Paper")
+        if execution_model == "intraday_5m":
+            config["execution_model"] = execution_model
+            if exit_mode == "structural":
+                config["exit_mode"] = exit_mode
+        if exit_mode == "fixed_percent" or execution_model == "intraday_5m":
             # 网页百分比除以100会产生浮点尾差；同一参数应复用同一账户。
             for key in ("initial_cash", "risk_fraction", "fee_bps", "slippage_bps", "stop_loss_pct", "take_profit_pct"):
-                value = config[key]
+                value = config.get(key)
                 if not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value):
                     number = float(format(value, ".15g"))
                     config[key] = int(number) if number.is_integer() else number
-            initial_cash, risk_fraction, fee_bps, slippage_bps, stop_loss_pct, take_profit_pct = (
-                config[k] for k in ("initial_cash", "risk_fraction", "fee_bps", "slippage_bps", "stop_loss_pct", "take_profit_pct"))
-        elif stop_loss_pct is not None or take_profit_pct is not None:
-            raise ValueError("结构出场方案不接受固定百分比参数")
-        execution_model = execution_model or ("intraday_5m" if mode == "forward" and exit_mode == "fixed_percent" else "daily_ohlc")
-        if execution_model not in ("intraday_5m", "daily_ohlc") or (execution_model == "intraday_5m" and (mode != "forward" or exit_mode != "fixed_percent")):
-            raise ValueError("盘中模型仅支持固定比例的前向Paper")
-        if execution_model == "intraday_5m":
-            config["execution_model"] = execution_model
+            initial_cash, risk_fraction, fee_bps, slippage_bps = (
+                config[k] for k in ("initial_cash", "risk_fraction", "fee_bps", "slippage_bps"))
+            stop_loss_pct, take_profit_pct = config.get("stop_loss_pct"), config.get("take_profit_pct")
         # 进程间锁保护定时任务与网页对同一账户的读-改-写。
         with (self.store.root / "paper.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -222,7 +249,10 @@ class ResearchService:
                     old = self.store.get_paper(account_id)
                 except KeyError:
                     pass
+            if old and old.get("automation_disabled"):
+                raise ValueError("该示例账户已停用，仅保留历史记录；请使用结构出场或另建实验参数版本")
             observations = {o["signal_id"]: o["observed_at"] for o in (old or {}).get("orders", [])}
+            saved_orders = {o["signal_id"]: o for o in (old or {}).get("orders", [])}
             profile_time = self.store.get_profile(profile_id)["created_at"] if profile_id else run["imported_at"]
             first_seen = max((run["imported_at"], profile_time, utc_now()), key=lambda s: datetime.fromisoformat(s.replace("Z", "+00:00")))
             signals = []
@@ -238,16 +268,24 @@ class ResearchService:
                 from .intraday import apply_intraday
                 for signal in signals:
                     signal["source_run_id"] = run_id
-                ledger_config = {k: config[k] for k in ("initial_cash", "risk_fraction", "fee_bps", "slippage_bps", "stop_loss_pct", "take_profit_pct")}
+                    if exit_mode == "structural":
+                        report = next(r["report"] for r in run["results"] if r["ticker"] == signal["ticker"])
+                        signal["risk_plan"] = _structural_plan(run, report)
+                        saved = saved_orders.get(signal["signal_id"])
+                        if saved:
+                            signal.update({k: saved[k] for k in ("stop", "target", "risk_plan", "source_run_id")})
+                ledger_config = _intraday_config(config)
                 result = apply_intraday(signals, {}, now=datetime.fromisoformat(utc_now().replace("Z", "+00:00")), config=ledger_config,
                                         state=old["state"] if old else None, started_at=first_seen if old is None else None)
                 result.update({"account_id": account_id, "run_id": run_id, "profile_id": profile_id, "source": run["source"],
                                "updated_at": utc_now(), "config": config, "automatic": True,
                                "validation_status": "forward_paper", "exit_mode": exit_mode,
-                               "planned_stop_pct": stop_loss_pct, "planned_target_pct": take_profit_pct, "planned_rr": take_profit_pct / stop_loss_pct,
+                               "planned_stop_pct": stop_loss_pct, "planned_target_pct": take_profit_pct,
+                               "planned_rr": take_profit_pct / stop_loss_pct if exit_mode == "fixed_percent" else None,
                                "provider_id": scope["provider_id"], "engine_revision": run.get("engine_revision"),
                                "signal_price_basis": run.get("data_snapshot", {}).get("price_basis"),
-                               "price_basis": "Yahoo完整5分钟OHLC；按实际模拟成交价冻结止损/止盈",
+                               "price_basis": ("Yahoo完整5分钟OHLC；结构价位来自信号日冻结报告" if exit_mode == "structural"
+                                               else "Yahoo完整5分钟OHLC；按实际模拟成交价冻结止损/止盈"),
                                "last_checked_at": (old or {}).get("last_checked_at"), "monitor": (old or {}).get("monitor", {"status": "not_run"})})
                 return self.store.save_paper(result)
             tickers = selected | {p["ticker"] for p in (old or {}).get("positions", [])} | {o["ticker"] for o in (old or {}).get("orders", []) if o["status"] == "pending"}
