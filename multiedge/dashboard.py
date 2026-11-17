@@ -171,6 +171,7 @@ class ResearchService:
                            "source": run["source"], "updated_at": utc_now(), "config": config,
                            "validation_status": "historical_replay" if mode == "replay" else "forward_paper",
                            "provider_id": run.get("data_snapshot", {}).get("provider_id", "marketwatch"),
+                           "engine_revision": run.get("engine_revision"),
                            "price_basis": run.get("data_snapshot", {}).get("price_basis"),
                            "price_snapshots": {ticker: frame.attrs.get("snapshots", []) for ticker, frame in frames.items()},
                            "data_missing": sorted(tickers - set(frames))})

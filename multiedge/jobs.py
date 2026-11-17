@@ -48,9 +48,11 @@ def daily(data_dir, state_dir, universe_path=None, provider="yahoo"):
     run = store.save_run(run)
     if run["counts"]["ERROR"]:
         raise RuntimeError(f"扫描包含 {run['counts']['ERROR']} 个失败标的，见快照 {run['run_id']}")
-    service.paper(run["run_id"], mode="forward")
+    default_account = service.paper(run["run_id"], mode="forward")
     for account in store.papers():
-        if account["mode"] == "forward" and account.get("profile_id"):
+        if (account["mode"] == "forward" and account["account_id"] != default_account["account_id"]
+                and account.get("provider_id") == run["data_snapshot"]["provider_id"]
+                and account.get("engine_revision") == run.get("engine_revision")):
             cfg = account["config"]
             service.paper(run["run_id"], **cfg)
     return {"run_id": run["run_id"], "as_of": run["as_of"], "counts": run["counts"]}
