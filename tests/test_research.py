@@ -127,3 +127,17 @@ def test_replay_new_price_snapshot_recomputes_history_in_new_account(tmp_path, m
     second = service.paper(run["run_id"], mode="replay")
     assert second["account_id"] != first["account_id"]
     assert second["orders"][0]["status"] == "filled"
+
+
+def test_fixed_percent_replay_uses_actual_entry_price_and_versions_exit_plan(tmp_path):
+    service = ResearchService(DATA, tmp_path)
+    run = service.store.save_run(build_local_run(["GOOGL"], "2025-08-01", DATA))
+    three = service.paper(run["run_id"], mode="replay", exit_mode="fixed_percent", stop_loss_pct=.03, take_profit_pct=.25)
+    five = service.paper(run["run_id"], mode="replay", exit_mode="fixed_percent", stop_loss_pct=.05, take_profit_pct=.25)
+    assert three["account_id"] != five["account_id"]
+    assert three["config"]["stop_loss_pct"] == .03
+    assert five["config"]["stop_loss_pct"] == .05
+    position = (three["positions"] + three["trades"])[0]
+    assert position["stop"] == pytest.approx(position["entry_price"] * .97)
+    assert position["target"] == pytest.approx(position["entry_price"] * 1.25)
+    assert position["planned_rr"] == pytest.approx(25 / 3)

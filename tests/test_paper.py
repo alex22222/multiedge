@@ -248,3 +248,86 @@ def test_start_date_without_timestamp_cannot_leave_an_old_entry_pending():
     result = run([signal()], normal_frames(), mode="forward", state=first)
     assert result["orders"][0]["status"] == "skipped"
     assert result["orders"][0]["reason"] == "account_started_after_entry"
+
+
+@pytest.mark.parametrize("stop_pct,rr", [(.03, 25 / 3), (.05, 5)])
+def test_fixed_exit_plan_uses_actual_entry_including_slippage(stop_pct, rr):
+    frames = {"ABC": bars([
+        ("2025-01-06", 100, 102, 98, 100),
+        ("2025-01-07", 110, 115, 108, 112),
+        ("2025-01-08", 112, 120, 108, 118),
+    ])}
+    result = run_paper([signal(stop=None, target=None)], frames, as_of="2025-01-08",
+                       fee_bps=0, slippage_bps=100, exit_mode="fixed_percent",
+                       stop_loss_pct=stop_pct, take_profit_pct=.25)
+    position = result["positions"][0]
+    assert position["entry_price"] == pytest.approx(111.1)
+    assert position["stop"] == pytest.approx(111.1 * (1 - stop_pct))
+    assert position["target"] == pytest.approx(111.1 * 1.25)
+    assert position["exit_mode"] == "fixed_percent"
+    assert position["planned_stop_pct"] == stop_pct
+    assert position["planned_target_pct"] == .25
+    assert position["planned_rr"] == pytest.approx(rr)
+    assert result["state"]["config"]["exit_mode"] == "fixed_percent"
+
+
+def test_fixed_plan_ignores_unavailable_or_invalid_structural_exits():
+    frames = normal_frames()
+    frames["ABC"].loc[pd.Timestamp("2025-01-07")] = [100, 106, 98, 105]
+    result = run([signal(stop=200, target="not a structural target")], frames,
+                 exit_mode="fixed_percent", stop_loss_pct=.03, take_profit_pct=.25)
+    assert result["orders"][0]["status"] == "filled"
+    assert result["positions"][0]["stop"] == 97
+    assert result["positions"][0]["target"] == 125
+
+
+@pytest.mark.parametrize("stop_pct", [.03, .05])
+def test_fixed_percent_target_closes_at_true_bar_touch(stop_pct):
+    frames = normal_frames()
+    frames["ABC"].loc[pd.Timestamp("2025-01-07")] = [100, 126, 99, 120]
+    result = run([signal(stop=None, target=None)], frames, exit_mode="fixed_percent",
+                 stop_loss_pct=stop_pct, take_profit_pct=.25)
+    trade = result["trades"][0]
+    assert trade["exit_reason"] == "target" and trade["exit_price"] == 125
+    assert trade["exit_mode"] == "fixed_percent" and trade["planned_target_pct"] == .25
+    assert result["positions"] == []
+
+
+def test_fixed_plan_stop_first_and_gap_exit_keep_real_price_rules():
+    frames = normal_frames()
+    frames["ABC"].loc[pd.Timestamp("2025-01-07")] = [100, 126, 96, 110]
+    both = run([signal()], frames, exit_mode="fixed_percent", stop_loss_pct=.03, take_profit_pct=.25)
+    assert both["trades"][0]["exit_reason"] == "stop_and_target"
+    assert both["trades"][0]["exit_price"] == 97
+    frames["ABC"].loc[pd.Timestamp("2025-01-07")] = [100, 106, 98, 105]
+    frames["ABC"].loc[pd.Timestamp("2025-01-08")] = [90, 94, 88, 92]
+    gap = run([signal()], frames, exit_mode="fixed_percent", stop_loss_pct=.03, take_profit_pct=.25)
+    assert gap["trades"][0]["exit_reason"] == "stop_gap"
+    assert gap["trades"][0]["exit_price"] == 90
+
+
+@pytest.mark.parametrize("params", [
+    {"stop_loss_pct": 0, "take_profit_pct": .25},
+    {"stop_loss_pct": 1, "take_profit_pct": .25},
+    {"stop_loss_pct": True, "take_profit_pct": .25},
+    {"stop_loss_pct": .03, "take_profit_pct": None},
+    {"stop_loss_pct": .03, "take_profit_pct": float("nan")},
+    {"stop_loss_pct": .03, "take_profit_pct": -.25},
+])
+def test_fixed_percent_plan_rejects_invalid_parameters(params):
+    with pytest.raises(ValueError, match="percent|pct"):
+        run([], normal_frames(), exit_mode="fixed_percent", **params)
+
+
+def test_exit_plan_resume_is_immutable_and_structural_config_stays_compatible():
+    structural = run([], normal_frames())
+    assert set(structural["state"]["config"]) == {"initial_cash", "risk_fraction", "fee_bps", "slippage_bps"}
+    first = run([], normal_frames(), "2025-01-07", exit_mode="fixed_percent",
+                stop_loss_pct=.03, take_profit_pct=.25)
+    again = run([], normal_frames(), exit_mode="fixed_percent", stop_loss_pct=.03,
+                take_profit_pct=.25, state=first)
+    assert run([], normal_frames(), exit_mode="fixed_percent", stop_loss_pct=.03,
+               take_profit_pct=.25, state=again) == again
+    with pytest.raises(ValueError, match="configuration"):
+        run([], normal_frames(), exit_mode="fixed_percent", stop_loss_pct=.05,
+            take_profit_pct=.25, state=first)

@@ -1,0 +1,29 @@
+[Unit]
+Description=Multi-Edge registered Paper 5-minute price checks
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=multiedge
+Group=multiedge
+WorkingDirectory=/opt/multiedge/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+ExecStart=/opt/multiedge/current/.venv/bin/python -m multiedge.jobs monitor --state-dir /var/lib/multiedge --data-dir /var/lib/multiedge/data
+TimeoutStartSec=4min
+MemoryMax=128M
+CPUQuota=20%
+TasksMax=32
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/multiedge
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+UMask=0077

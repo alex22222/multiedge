@@ -84,27 +84,44 @@
         </section>
 
         <section id="view-paper" class="view" aria-label="Paper 验证" hidden>
-          <div class="notice neutral-notice"><span aria-hidden="true">◎</span><p><strong>历史回放与前向 Paper 分开记账。</strong>回放用于检查规则；前向记录从登记后的可用交易日开始累积。结果保留手续费、滑点和成交假设。</p></div>
+          <div class="notice neutral-notice"><span aria-hidden="true">◎</span><p><strong>BUY 信号自动进入 Paper，按真实行情验证出场。</strong>系统分别记录“3% 止损 / 25% 止盈”和“5% 止损 / 25% 止盈”两组方案。历史回放与前向 Paper 独立记账，成交与估值保留实际行情时间。</p></div>
+          <article class="panel paper-thesis">
+            <div class="panel-heading"><div><p class="eyebrow">SMALL RISK · LARGER POTENTIAL</p><h2>先定义能承受的损失，再观察收益能否走出来</h2></div><span class="subtle-label">视频举例的验证假设</span></div>
+            <div class="paper-scenarios">
+              <div class="paper-scenario"><span>方案 A · 止损 3%</span><strong>3% <i>→</i> 25%</strong><p>假设买入价 $100，止损 $97，止盈 $125</p><small>计划盈亏比约 <b>8.33R</b>，未扣费用与滑点</small></div>
+              <div class="paper-scenario"><span>方案 B · 止损 5%</span><strong>5% <i>→</i> 25%</strong><p>假设买入价 $100，止损 $95，止盈 $125</p><small>计划盈亏比 <b>5R</b>，未扣费用与滑点</small></div>
+            </div>
+            <ol class="paper-flow"><li><span>01</span><div><strong>BUY 自动入队</strong><p>保留信号与登记时间</p></div></li><li><span>02</span><div><strong>满足条件后模拟买入</strong><p>从实际买入价冻结止损、止盈</p></div></li><li><span>03</span><div><strong>跟踪真实股价</strong><p>触及出场条件后模拟卖出</p></div></li><li><span>04</span><div><strong>逐笔留证与复盘</strong><p>记录价格、原因、费用和净损益</p></div></li></ol>
+            <p class="form-help">25% 是用于验证的目标，不是预期承诺。3% / 5% 是单只股票相对买入价的止损距离；账户每笔风险预算默认是权益的 0.35%，用于决定买多少股。跳空和成交成本可能使实际结果偏离计划。</p>
+          </article>
           <div class="paper-layout">
             <form id="paper-form" class="panel setup-panel">
-              <div class="panel-heading"><div><p class="eyebrow">PAPER SETUP</p><h2>建立一次验证</h2></div></div>
+              <div class="panel-heading"><div><p class="eyebrow">PAPER SETUP</p><h2>配置独立验证账户</h2></div></div>
               <label>验证方式<select name="mode"><option value="forward">前向 Paper · 从现在开始记录</option><option value="replay">历史回放 · 检查历史规则</option></select></label>
               <label>验证策略<select name="profile_id" id="paper-profile-select"><option value="">原始策略 · 冻结基线</option></select></label>
+              <label>出场方案<select name="exit_mode" id="paper-exit-mode"><option value="fixed_percent">固定比例 · 止损 / 止盈</option><option value="structural">原始结构 · 结构止损 / 前高目标</option></select></label>
+              <div id="paper-percent-fields">
+                <div class="paper-presets" role="group" aria-label="视频示例方案"><button class="filter-button active" type="button" data-paper-stop="3" aria-pressed="true">3% / 25%</button><button class="filter-button" type="button" data-paper-stop="5" aria-pressed="false">5% / 25%</button></div>
+                <div class="form-grid"><label>股价止损距离（%）<input name="stop_loss_percent" type="number" min="0.1" max="99" step="0.1" value="3" required></label><label>股价止盈目标（%）<input name="take_profit_percent" type="number" min="0.1" max="1000" step="0.1" value="25" required></label></div>
+              </div>
+              <p class="paper-plan-preview" id="paper-plan-preview">按实际模拟买入价设置止损 3%、止盈 25%，计划盈亏比约 8.33R。</p>
               <label>初始资金（USD）<input name="initial_cash" type="number" min="100" max="100000000" step="100" value="100000" required></label>
-              <div class="form-grid"><label>单笔风险（%）<input name="risk_percent" type="number" min="0.01" max="5" step="0.01" value="0.35" required></label><label>手续费（bps）<input name="fee_bps" type="number" min="0" max="1000" step="1" value="5" required></label></div>
+              <div class="form-grid"><label>账户每笔风险预算（%）<input name="risk_percent" type="number" min="0.01" max="5" step="0.01" value="0.35" required></label><label>手续费（bps）<input name="fee_bps" type="number" min="0" max="1000" step="1" value="5" required></label></div>
               <label>滑点（bps）<input name="slippage_bps" type="number" min="0" max="1000" step="1" value="5" required></label>
-              <p class="form-help">按止损距离分配风险。缺失行情、无有效止损或尚无下一个交易日时，记录等待或跳过原因。</p>
+              <p class="form-help">默认两组自动账户由系统维护；这里可另建参数版本。仓位按账户风险预算与止损距离计算。等待、缺行情或不可成交时会保留原因。</p>
               <button class="primary-button full-width" type="submit">建立 Paper 验证 <span aria-hidden="true">↗</span></button>
               <p id="paper-form-status" class="form-status" role="status"></p>
             </form>
             <div class="paper-results">
               <label class="account-selector">验证账户<select id="paper-account-select"><option value="">尚无验证账户</option></select></label>
+              <div class="paper-account-plan" id="paper-account-plan"><span>本账户出场方案</span><strong id="paper-account-plan-title">等待选择账户</strong><p id="paper-account-plan-detail">成交后显示冻结的止损、止盈与实际执行记录。</p><small id="paper-monitor-note"></small></div>
               <div class="notice neutral-notice" id="paper-data-note" hidden></div>
               <div class="metrics-grid paper-metrics"><article class="metric-card"><span>账面权益</span><strong id="paper-equity">—</strong><small id="paper-mode-note">等待验证账户</small></article><article class="metric-card"><span>可用现金</span><strong id="paper-cash">—</strong><small id="paper-as-of">尚无估值</small></article><article class="metric-card"><span>持仓 / 完成交易</span><strong id="paper-counts">—</strong><small>以实际台账为准</small></article></div>
               <article class="panel"><div class="panel-heading"><div><p class="eyebrow">EQUITY OBSERVATIONS</p><h2>权益观察</h2></div><span class="subtle-label" id="equity-sample-count">0 个估值点</span></div><div id="equity-chart" class="equity-chart"><div class="empty-state">尚无权益观察。首个估值点产生后会在这里显示。</div></div><dl id="paper-stat-summary" class="paper-stat-summary"></dl></article>
             </div>
           </div>
-          <article class="panel table-panel"><div class="panel-heading"><h2>持仓与估值</h2><span class="subtle-label" id="paper-position-note">尚无持仓</span></div><div class="table-scroll"><table><thead><tr><th scope="col">标的</th><th scope="col">数量</th><th scope="col">入场价</th><th scope="col">估值价</th><th scope="col">止损 / 目标</th><th scope="col">估值状态</th></tr></thead><tbody id="paper-positions-body"></tbody></table></div><div class="empty-state" id="paper-positions-empty">没有持仓记录。</div></article>
+          <article class="panel table-panel"><div class="panel-heading"><h2>持仓与冻结出场价</h2><span class="subtle-label" id="paper-position-note">尚无持仓</span></div><div class="table-scroll"><table><thead><tr><th scope="col">标的 / 数量</th><th scope="col">实际模拟买入</th><th scope="col">最新估值</th><th scope="col">止损价</th><th scope="col">止盈价</th><th scope="col">计划盈亏比</th><th scope="col">估值状态</th></tr></thead><tbody id="paper-positions-body"></tbody></table></div><div class="empty-state" id="paper-positions-empty">BUY 信号成交后，持仓和冻结的出场价会显示在这里。</div></article>
+          <article class="panel table-panel"><div class="panel-heading"><h2>已平仓交易</h2><span class="subtle-label" id="paper-trade-note">尚无完成交易</span></div><div class="table-scroll"><table><thead><tr><th scope="col">标的 / 数量</th><th scope="col">实际模拟买入</th><th scope="col">实际模拟卖出</th><th scope="col">冻结止损 / 止盈</th><th scope="col">出场原因</th><th scope="col">买 / 卖费用</th><th scope="col">净损益</th></tr></thead><tbody id="paper-trades-body"></tbody></table></div><div class="empty-state" id="paper-trades-empty">止损、止盈或其他已记录出场发生后，逐笔结果会显示在这里。</div></article>
           <article class="panel table-panel"><div class="panel-heading"><h2>订单与成交记录</h2><span class="subtle-label">保留等待、跳过与成交原因</span></div><div class="table-scroll"><table><thead><tr><th scope="col">时间</th><th scope="col">标的</th><th scope="col">动作 / 状态</th><th scope="col">数量 / 价格</th><th scope="col">记录说明</th></tr></thead><tbody id="paper-events-body"></tbody></table></div><div class="empty-state" id="paper-events-empty">尚无订单或成交记录。</div></article>
           <article class="panel"><div class="panel-heading"><h2>本账户的验证假设</h2></div><div id="paper-assumptions" class="muted-text">选择账户后显示对应的费用、滑点和成交规则。</div></article>
         </section>

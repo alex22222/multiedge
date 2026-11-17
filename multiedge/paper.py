@@ -59,7 +59,7 @@ def _bar(frames, ticker, day):
     return values
 
 
-def _signal(value):
+def _signal(value, exit_mode="structural"):
     ticker = str(value["ticker"]).strip().upper()
     if not ticker:
         raise ValueError("ticker is required")
@@ -70,7 +70,7 @@ def _signal(value):
     if observed is not None and not isinstance(observed, str):
         raise ValueError("observed_at must be an ISO timestamp")
     target = _number(value.get("target"))
-    if value.get("target") is not None and (target is None or target <= 0):
+    if exit_mode == "structural" and value.get("target") is not None and (target is None or target <= 0):
         raise ValueError("target must be a positive finite number or null")
     return {"ticker": ticker, "signal_date": day, "stop": _number(value.get("stop")),
             "target": target,
@@ -144,7 +144,8 @@ def _forward_reason(order, entry_day, started_at=None):
 
 def run_paper(signals: list[dict], frames: dict[str, pd.DataFrame], *, as_of,
               mode="replay", initial_cash=100000, risk_fraction=.0035,
-              fee_bps=5, slippage_bps=5, state=None, started_at=None) -> dict:
+              fee_bps=5, slippage_bps=5, state=None, started_at=None,
+              exit_mode="structural", stop_loss_pct=None, take_profit_pct=None) -> dict:
     """Return a JSON-persistable ledger and presentation-friendly summaries.
 
 Resume with result['state'] (or the entire previous result). Existing accounting
@@ -158,6 +159,15 @@ Orders at the same open are allocated deterministically by date/ticker/id.
     as_of = _date(as_of)
     if mode not in ("replay", "forward"):
         raise ValueError("mode must be replay or forward")
+    if exit_mode not in ("structural", "fixed_percent"):
+        raise ValueError("exit_mode must be structural or fixed_percent")
+    if exit_mode == "fixed_percent":
+        stop_loss_pct, take_profit_pct = _number(stop_loss_pct), _number(take_profit_pct)
+        if (stop_loss_pct is None or not 0 < stop_loss_pct < 1
+                or take_profit_pct is None or not 0 < take_profit_pct <= 10):
+            raise ValueError("fixed_percent requires 0 < stop_loss_pct < 1 and 0 < take_profit_pct ≤ 10")
+    elif stop_loss_pct is not None or take_profit_pct is not None:
+        raise ValueError("percent exit parameters require fixed_percent mode")
     registration = _timestamp(started_at)
     if mode == "forward" and started_at is not None and registration is None:
         raise ValueError("started_at must be a timezone-aware ISO timestamp")
@@ -168,6 +178,8 @@ Orders at the same open are allocated deterministically by date/ticker/id.
     if initial_cash <= 0 or not 0 < risk_fraction <= 1 or not 0 <= fee_bps < 10000 or not 0 <= slippage_bps < 10000:
         raise ValueError("invalid account configuration")
     config = {key: float(value) for key, value in amounts.items()}
+    if exit_mode == "fixed_percent":
+        config.update({"exit_mode": exit_mode, "stop_loss_pct": stop_loss_pct, "take_profit_pct": take_profit_pct})
     frames = _frames(frames)
     calendar_source = "SPX" if "SPX" in frames else "union_of_supplied_bars"
     reference = [frames["SPX"]] if "SPX" in frames else list(frames.values())
@@ -184,7 +196,7 @@ Orders at the same open are allocated deterministically by date/ticker/id.
                  "cash": float(initial_cash), "fees_paid": 0.0, "positions": [], "orders": [],
                  "trades": [], "events": [], "equity_curve": [], "processed_signals": {}}
     previous = state["as_of"]
-    pending = sorted((_signal(value) for value in signals), key=lambda s: (s["signal_date"], s["ticker"], s["signal_id"]))
+    pending = sorted((_signal(value, exit_mode) for value in signals), key=lambda s: (s["signal_date"], s["ticker"], s["signal_id"]))
     if mode == "forward":
         known_start = bool(state.get("start_date") or state.get("started_at"))
         if "start_date" not in state:
@@ -213,9 +225,14 @@ Orders at the same open are allocated deterministically by date/ticker/id.
             continue
         state["processed_signals"][identity] = fingerprint
         order = {**value, "status": "pending", "reason": None, "entry_session": None}
+        if exit_mode == "fixed_percent":
+            order.update({"source_stop": value["stop"], "source_target": value["target"],
+                          "stop": None, "target": None, "exit_mode": exit_mode,
+                          "planned_stop_pct": stop_loss_pct, "planned_target_pct": take_profit_pct,
+                          "planned_rr": take_profit_pct / stop_loss_pct})
         state["orders"].append(order)
         # Invalid stops cannot become executable just because fresh prices arrive.
-        if value["stop"] is None or value["stop"] <= 0:
+        if exit_mode == "structural" and (value["stop"] is None or value["stop"] <= 0):
             event_day = max(value["signal_date"], state["start_date"]) if mode == "forward" else value["signal_date"]
             _skip(state, order, "invalid_stop", event_day)
     for order in state["orders"]:
@@ -265,13 +282,15 @@ Orders at the same open are allocated deterministically by date/ticker/id.
                 _skip(state, order, "already_holding", day)
                 continue
             price = bar["Open"] * (1 + slip)
-            if order["stop"] >= bar["Open"]:
+            stop = price * (1 - stop_loss_pct) if exit_mode == "fixed_percent" else order["stop"]
+            target = price * (1 + take_profit_pct) if exit_mode == "fixed_percent" else order["target"]
+            if stop >= bar["Open"]:
                 _skip(state, order, "stop_at_or_above_entry", day)
                 continue
-            if order["target"] is not None and order["target"] <= price:
+            if target is not None and target <= price:
                 _skip(state, order, "target_at_or_below_entry", day)
                 continue
-            risk_size = math.floor(_equity(state) * risk_fraction / (price - order["stop"]))
+            risk_size = math.floor(_equity(state) * risk_fraction / (price - stop))
             cash_size = math.floor(state["cash"] / (price * (1 + fees)))
             quantity = min(risk_size, cash_size)
             if quantity <= 0:
@@ -281,13 +300,20 @@ Orders at the same open are allocated deterministically by date/ticker/id.
             state["cash"] -= quantity * price + entry_fee
             state["fees_paid"] += entry_fee
             position = {"ticker": order["ticker"], "quantity": quantity, "entry_price": price,
-                        "entry_date": day, "entry_fee": entry_fee, "stop": order["stop"],
-                        "target": order["target"], "mark": price, "mark_date": day,
+                        "entry_date": day, "entry_fee": entry_fee, "stop": stop,
+                        "target": target, "mark": price, "mark_date": day,
+                        "exit_mode": exit_mode,
+                        "planned_stop_pct": stop_loss_pct if exit_mode == "fixed_percent" else (price - stop) / price,
+                        "planned_target_pct": take_profit_pct if exit_mode == "fixed_percent" else (target / price - 1 if target is not None else None),
+                        "planned_rr": (target - price) / (price - stop) if target is not None else None,
                         "stale": False, "source_signal_id": order["signal_id"]}
             state["positions"].append(position)
             order["status"] = "filled"
+            if exit_mode == "fixed_percent":
+                order["stop"], order["target"] = stop, target
             _event(state, "entry", day, signal_id=order["signal_id"], ticker=order["ticker"],
-                   quantity=quantity, price=price, fee=entry_fee)
+                   quantity=quantity, price=price, fee=entry_fee, stop=stop, target=target,
+                   exit_mode=exit_mode, planned_rr=position["planned_rr"])
         # Intraday proceeds cannot finance orders filled earlier at this same open.
         for position in list(state["positions"]):
             bar = _bar(frames, position["ticker"], day)
@@ -326,6 +352,10 @@ Orders at the same open are allocated deterministically by date/ticker/id.
             "events": state["events"], "equity_curve": state["equity_curve"], "metrics": metrics,
             "calendar_source": calendar_source, "data_as_of": data_as_of,
             "data_stale": data_as_of != as_of,
-            "assumptions": ["收盘信号次交易日开盘成交", "同日双触发先止损", "缺目标仅跟踪止损",
+            "exit_mode": exit_mode, "planned_stop_pct": stop_loss_pct, "planned_target_pct": take_profit_pct,
+            "planned_rr": take_profit_pct / stop_loss_pct if exit_mode == "fixed_percent" else None,
+            "assumptions": ["收盘信号次交易日开盘成交", "同日双触发先止损",
+                            (f"按实际模拟入场价设置 {stop_loss_pct:.1%} 止损 / {take_profit_pct:.1%} 止盈；计划 {take_profit_pct / stop_loss_pct:.2f}R（未扣成本）"
+                             if exit_mode == "fixed_percent" else "缺目标仅跟踪止损"),
                             "按字母顺序分配同日现金", "风险预算按价差估算，跳空/费用可能超预算",
                             "上游核验交易日已经完整收盘", "不含分红/拆股处理；不强制期末平仓"]}

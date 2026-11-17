@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from .dashboard import ResearchService, latest_complete_date
+from .dashboard import ResearchService, VIDEO_PAPER_PLANS, latest_complete_date
 from .research import ResearchStore, attach_sector_context, build_local_run, build_multica_run, clean, digest, utc_now
 
 
@@ -48,19 +48,27 @@ def daily(data_dir, state_dir, universe_path=None, provider="yahoo"):
     run = store.save_run(run)
     if run["counts"]["ERROR"]:
         raise RuntimeError(f"扫描包含 {run['counts']['ERROR']} 个失败标的，见快照 {run['run_id']}")
-    default_account = service.paper(run["run_id"], mode="forward")
+    automatic_ids = set()
+    for stop, target in VIDEO_PAPER_PLANS:
+        account = service.paper(run["run_id"], mode="forward", exit_mode="fixed_percent", stop_loss_pct=stop, take_profit_pct=target)
+        automatic_ids.add(account["account_id"])
     for account in store.papers():
-        if (account["mode"] == "forward" and account["account_id"] != default_account["account_id"]
+        if (account["mode"] == "forward" and account["account_id"] not in automatic_ids
                 and account.get("provider_id") == run["data_snapshot"]["provider_id"]
                 and account.get("engine_revision") == run.get("engine_revision")):
             cfg = account["config"]
             service.paper(run["run_id"], **cfg)
+    monitor = service.monitor_paper(reconcile=True)
+    path = Path(state_dir) / "last-paper-monitor.json"
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(clean(monitor), ensure_ascii=False, allow_nan=False))
+    os.replace(temporary, path)
     return {"run_id": run["run_id"], "as_of": run["as_of"], "counts": run["counts"]}
 
 
 def main():
     parser = argparse.ArgumentParser(prog="multiedge.jobs")
-    parser.add_argument("command", choices=("seed", "import-multica", "import-run", "daily", "status"))
+    parser.add_argument("command", choices=("seed", "import-multica", "import-run", "daily", "monitor", "status"))
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--state-dir", default="state")
     parser.add_argument("--path")
@@ -79,17 +87,21 @@ def main():
             result = {"run_id": run["run_id"], "coverage": run["coverage"], "result_count": run["result_count"], "expected_count": run["expected_count"]}
         elif args.command == "daily":
             result = daily(args.data_dir, args.state_dir, args.universe, args.provider)
+        elif args.command == "monitor":
+            result = ResearchService(args.data_dir, args.state_dir).monitor_paper()
         else:
             result = ResearchService(args.data_dir, args.state_dir).state()
         if args.command != "status":
-            path = Path(args.state_dir) / "last-job.json"
+            path = Path(args.state_dir) / ("last-paper-monitor.json" if args.command == "monitor" else "last-job.json")
             temp = path.with_suffix(".tmp")
-            temp.write_text(json.dumps(clean({"status": "completed", "command": args.command, "observed_at": utc_now(), "result": result}), ensure_ascii=False))
+            receipt = ({**result, "command": args.command, "observed_at": utc_now()} if args.command == "monitor"
+                       else {"status": "completed", "command": args.command, "observed_at": utc_now(), "result": result})
+            temp.write_text(json.dumps(clean(receipt), ensure_ascii=False, allow_nan=False))
             os.replace(temp, path)
         print(json.dumps(clean(result), ensure_ascii=False, allow_nan=False))
     except (ValueError, RuntimeError, OSError) as error:
         failure = {"status": "failed", "command": args.command, "observed_at": utc_now(), "error": str(error)}
-        path = Path(args.state_dir) / "last-job.json"
+        path = Path(args.state_dir) / ("last-paper-monitor.json" if args.command == "monitor" else "last-job.json")
         temp = path.with_suffix(".tmp")
         temp.write_text(json.dumps(failure, ensure_ascii=False))
         os.replace(temp, path)

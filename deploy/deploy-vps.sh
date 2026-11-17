@@ -7,10 +7,11 @@ KEY="$HOME/.ssh/polymtrade_vultr_ed25519"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUN_JSON=""
 ENABLE_DAILY=0
+ENABLE_MONITOR=0
 
 usage() {
-  echo "Usage: bash deploy/deploy-vps.sh [--run-json /path/to/sanitized-run.json] [--enable-daily]"
-  echo "Target is fixed: root@173.199.122.23; daily timer is not enabled by default."
+  echo "Usage: bash deploy/deploy-vps.sh [--run-json /path/to/sanitized-run.json] [--enable-daily] [--enable-monitor]"
+  echo "Target is fixed: root@173.199.122.23; new timers are not enabled by default."
 }
 
 while [ "$#" -gt 0 ]; do
@@ -21,6 +22,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --enable-daily) ENABLE_DAILY=1; shift ;;
+    --enable-monitor) ENABLE_MONITOR=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
@@ -72,10 +74,11 @@ if [ -n "$RUN_JSON" ]; then
 fi
 
 echo "Installing isolated release $RELEASE"
-"${SSH[@]}" bash -s -- "$RELEASE" "$ENABLE_DAILY" <<'REMOTE'
+"${SSH[@]}" bash -s -- "$RELEASE" "$ENABLE_DAILY" "$ENABLE_MONITOR" <<'REMOTE'
 set -Eeuo pipefail
 release_name="$1"
 enable_daily="$2"
+enable_monitor="$3"
 [[ "$release_name" =~ ^[0-9]{8}T[0-9]{6}Z-[a-f0-9]+$ ]] || exit 2
 stage="/opt/multiedge/.stage-$release_name"
 release="/opt/multiedge/releases/$release_name"
@@ -93,6 +96,11 @@ timer_was_enabled=0
 systemctl is-enabled --quiet multiedge-daily.timer && timer_was_enabled=1
 timer_was_active=0
 systemctl is-active --quiet multiedge-daily.timer && timer_was_active=1
+monitor_was_enabled=0
+systemctl is-enabled --quiet multiedge-paper-monitor.timer && monitor_was_enabled=1
+monitor_was_active=0
+systemctl is-active --quiet multiedge-paper-monitor.timer && monitor_was_active=1
+units=(multiedge.service multiedge-daily.service multiedge-daily.timer multiedge-paper-monitor.service multiedge-paper-monitor.timer)
 
 rollback() {
   status=$?
@@ -105,6 +113,8 @@ rollback() {
   if [ "$activated" = 1 ]; then
     if [ "$timer_was_active" = 0 ]; then systemctl stop multiedge-daily.timer; fi
     if [ "$timer_was_enabled" = 0 ]; then systemctl disable multiedge-daily.timer; fi
+    if [ "$monitor_was_active" = 0 ]; then systemctl stop multiedge-paper-monitor.timer; fi
+    if [ "$monitor_was_enabled" = 0 ]; then systemctl disable multiedge-paper-monitor.timer; fi
     if [ "$was_enabled" = 0 ]; then systemctl disable multiedge.service; fi
     if [ -n "$previous" ]; then
       ln -sfn "$previous" /opt/multiedge/.current-rollback
@@ -112,7 +122,7 @@ rollback() {
     else
       rm -f /opt/multiedge/current
     fi
-    for unit in multiedge.service multiedge-daily.service multiedge-daily.timer; do
+    for unit in "${units[@]}"; do
       if [ -f "$release/.previous-units/$unit" ]; then
         cp -p "$release/.previous-units/$unit" "/etc/systemd/system/$unit"
       else
@@ -122,6 +132,7 @@ rollback() {
     systemctl daemon-reload
     if [ "$was_active" = 1 ]; then systemctl restart multiedge; else systemctl stop multiedge; fi
     if [ "$timer_was_active" = 1 ]; then systemctl restart multiedge-daily.timer; fi
+    if [ "$monitor_was_active" = 1 ]; then systemctl restart multiedge-paper-monitor.timer; fi
   fi
   echo "Deployment failed; previous service and Caddy configuration restored where present. State and releases retained."
   exit "$status"
@@ -153,12 +164,12 @@ if [ -f "$stage/initial-run.json" ]; then
 fi
 
 install -d -m 0700 "$release/.previous-units"
-for unit in multiedge.service multiedge-daily.service multiedge-daily.timer; do
+for unit in "${units[@]}"; do
   if [ -f "/etc/systemd/system/$unit" ]; then cp -p "/etc/systemd/system/$unit" "$release/.previous-units/$unit"; fi
 done
 cp -p "$cf" "$release/Caddyfile.before"
 activated=1
-for unit in multiedge.service multiedge-daily.service multiedge-daily.timer; do
+for unit in "${units[@]}"; do
   install -m 0644 "$release/deploy/$unit" "/etc/systemd/system/$unit"
 done
 ln -sfn "$release" /opt/multiedge/.current-next
@@ -223,6 +234,7 @@ code="$(curl -sS --max-time 15 --resolve spaceflag.site:443:127.0.0.1 -o /dev/nu
 test "$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' http://127.0.0.1:4173/health)" = 401
 systemctl is-active --quiet multiedge.service
 if [ "$enable_daily" = 1 ]; then systemctl enable --now multiedge-daily.timer; fi
+if [ "$enable_monitor" = 1 ]; then systemctl enable --now multiedge-paper-monitor.timer; fi
 trap - EXIT
 rm -rf -- "$stage"
 echo "Release installed: $release"

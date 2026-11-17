@@ -1,0 +1,13 @@
+[Unit]
+Description=Check Multi-Edge Paper every 5 minutes in U.S. regular hours
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:30/5:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 10..15:00/5:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 16:00,05:00 America/New_York
+AccuracySec=15s
+Persistent=false
+Unit=multiedge-paper-monitor.service
+
+[Install]
+WantedBy=timers.target

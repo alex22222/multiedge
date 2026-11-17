@@ -14,8 +14,9 @@ The dashboard uses `https://spaceflag.site/multiedge/` and the existing Binance 
 | Dedicated Unix account | `multiedge` |
 | Dashboard | `multiedge.service`, 180 MB / 20% CPU |
 | Daily research job | `multiedge-daily.service`, 160 MB / 25% CPU |
+| Intraday Paper checks | `multiedge-paper-monitor.service`, 128 MB / 20% CPU |
 
-The two services have a combined configured memory maximum of 340 MB. Both run with a read-only filesystem except for their own state directory. OpenBLAS and OMP use one thread. Deployment does not copy Multica CLI authentication, `.env` files, keys, local discussion context, Git metadata or runtime databases. It does not change Binance or GMGN application units or trading configuration.
+All services run with a read-only filesystem except for their own state directory. OpenBLAS and OMP use one thread. The scheduled intraday and daily jobs use different hours; the daily job performs its own close reconciliation within its 160 MB limit. Deployment does not copy Multica CLI authentication, `.env` files, keys, local discussion context, Git metadata or runtime databases. It does not change Binance or GMGN application units or trading configuration.
 
 Prerequisites on the VPS: Python 3.10+ with `venv`, `pip`, `curl`, systemd, Caddy and the existing `/gmgn/` shared-login route. On the Mac, the existing SSH identity is `~/.ssh/polymtrade_vultr_ed25519`; SSH host-key verification remains enabled.
 
@@ -49,10 +50,25 @@ sudo systemctl list-timers multiedge-daily.timer
 
 `--enable-daily` performs the last activation step during deployment when those checks have already passed. The schedule is Monday–Friday at **18:30 America/New_York**, following U.S. daylight saving time. `Persistent=true` catches up a missed timer. The jobs layer must choose a completed session, handle market holidays and persist idempotent progress; the timer itself is not an exchange calendar. It performs research and Paper validation only.
 
+The daily scan automatically registers every baseline BUY in two separate fixed-exit accounts (3%/25% and 5%/25%), then reconciles their completed 5-minute bars. Existing structural accounts remain independent.
+
+## Five-minute Paper schedule
+
+After one manual price check succeeds, enable the separate timer:
+
+```bash
+sudo systemctl start multiedge-paper-monitor.service
+sudo journalctl -u multiedge-paper-monitor.service --no-pager -n 40
+sudo systemctl enable --now multiedge-paper-monitor.timer
+sudo systemctl list-timers multiedge-paper-monitor.timer
+```
+
+`--enable-monitor` can activate it during later verified deployments. It runs every five minutes from 09:30 through 16:05 New York time on weekdays. `Persistent=false` avoids interpreting missed timer ticks as past executions; each successful check reconciles available completed bars after actual registration. Actual sessions, holidays, early closes and source freshness are checked against provider session metadata. Missing, stale or discontinuous quotes pause affected processing and appear in `last-paper-monitor.json` and account records. Normalized bars and source hashes are retained under `/var/lib/multiedge/intraday_quotes`; source exchange delay may be unknown. This is OHLC-based Paper simulation, with no brokerage connection.
+
 ## Inspect and roll back
 
 ```bash
-sudo systemctl status multiedge multiedge-daily.timer
+sudo systemctl status multiedge multiedge-daily.timer multiedge-paper-monitor.timer
 sudo journalctl -u multiedge -u multiedge-daily --no-pager -n 80
 curl --fail http://127.0.0.1:8321/health
 readlink -f /opt/multiedge/current
