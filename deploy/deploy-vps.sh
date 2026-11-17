@@ -47,6 +47,7 @@ trap 'rm -rf -- "$LOCAL_STAGE"' EXIT
 echo "Checking authorized VPS, existing login and Caddy configuration"
 "${SSH[@]}" 'set -eu
 command -v python3 >/dev/null
+python3 -m pip --version >/dev/null
 command -v caddy >/dev/null
 test -f /etc/caddy/Caddyfile
 systemctl is-active --quiet caddy
@@ -56,7 +57,7 @@ if ss -ltnH "sport = :8321" | grep -q .; then
 fi'
 
 echo "Packaging source without credentials, local context or runtime state"
-tar -czf "$LOCAL_STAGE/source.tar.gz" \
+tar --no-xattrs --no-mac-metadata -czf "$LOCAL_STAGE/source.tar.gz" \
   --exclude='./.git' --exclude='./.venv' --exclude='./.multica' --exclude='./.kimi' \
   --exclude='./.multica-import' --exclude='./.codex' --exclude='./state' --exclude='./runtime' \
   --exclude='./output' --exclude='./.playwright-cli' \
@@ -130,8 +131,8 @@ getent passwd multiedge >/dev/null || useradd --system --user-group --home-dir "
 install -d -m 0755 /opt/multiedge/releases "$release"
 install -d -o multiedge -g multiedge -m 0750 "$state" "$state/data" "$state/imports"
 tar -xzf "$stage/source.tar.gz" -C "$release"
-python3 -m venv "$release/.venv"
-"$release/.venv/bin/pip" install --disable-pip-version-check --no-cache-dir -r "$release/requirements.txt"
+python3 -m venv --without-pip "$release/.venv"
+python3 -m pip --python "$release/.venv/bin/python" install --disable-pip-version-check --no-cache-dir -r "$release/requirements.txt"
 chown -R root:root "$release"
 cd "$release"
 runuser -u multiedge -- env PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
