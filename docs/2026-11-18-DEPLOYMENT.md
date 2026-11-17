@@ -75,3 +75,26 @@ systemctl status multiedge-paper-monitor.timer multiedge-daily.timer
 journalctl -u multiedge-paper-monitor.service -n 30 --no-pager
 cat /var/lib/multiedge/last-paper-monitor.json
 ```
+
+## 第三轮：按结构定价，纠正固定百分比误读
+
+用户明确前轮3%/5%与25%只是举例。修正版 `9950072` 已部署于 `/opt/multiedge/releases/20261117T174405Z-9950072`，本地与服务器216项测试通过，独立代码和服务器复核通过。默认BUY改为逐股结构出场，保留5分钟执行检查。原始引擎、边缘、指标与Config均未改。
+
+依据既有视频笔记E1/H6，Google案例参考7/21关键K线低点下方及多结构失效，目标看前高。系统直接使用信号日冻结报告的stop/target；0.1×ATR缓冲是项目操作化假设，不能当作视频统一数值。实际成交后再计算风险距离、仓位和RR；目标不可得保持未知，仅跟踪结构止损。本轮不增加移动或放宽止损的算法。
+
+迁移前数据库备份：`/var/lib/multiedge/archives/before-structural-correction-20261117T174311Z.sqlite3`。北京时间01:45:46将旧两固定示例标记`automation_disabled=true`、`automatic=false`，不再接收新信号或自动推进。独立复核确认其state/config/orders/positions/trades/events/equity_curve/cash/equity/metrics均与备份一致；没有删除、重算或伪造平仓。迁移档案保存在`archives/structural-correction/`。
+
+新结构账户`forward-baseline-1719bb3932`于北京时间01:45:47真实登记，使用同一2026-11-16日线报告：
+
+| 标的 | 关键K线日期 | E1低点 | 结构止损 | 前高目标 |
+| --- | --- | ---: | ---: | --- |
+| AMGN | 2026-09-29 | 414.11 | 412.95 | 不可得 |
+| MMM | 2026-10-20 | 162.13 | 161.66 | 不可得 |
+
+01:47真实行情检查只处理新账户，AMGN/MMM/SPX来源均新鲜，0错误；当时2笔pending、0持仓、0成交，等待实际登记后的合格完整K线，没有沿用旧示例的成交时间与价格。目标、实际成交后的风险距离/RR不虚构。新账户后续状态以实时账本为准。
+
+01:50定时器实际触发，检查成功且0错误，登记后首个估值点截至01:50、`data_stale=false`；01:45开盘早于01:45:47登记，仍未补买，2笔pending符合执行约定。该批次单独存档为`archives/structural-correction/acceptance-1750.json`。
+
+完整日线任务再次成功：101只，BUY2/WATCH44/NO55、0失败，同一快照无重复订单，峰值99.1MiB。盘中timer已恢复，纽约18:30日线timer保持启用。独立只读复核确认应用200、原4173健康接口401、公网303至登录，GMGN/Caddy无新增重启、无OOM；当时可用456MiB内存，现有资源够用。
+
+生产浏览器确认默认结构表单不提交比例、相同参数复用新账户；每笔可展开锚点日期/价格、均线参考、冻结趋势线、MEA、缓冲与快照来源，旧示例标记已停用历史快照。390px无溢出，控制台零错误。新回执为216项/9950072，旧195项回执已归档；当前验收证据为`archives/structural-correction/acceptance.json`。
