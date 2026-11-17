@@ -6,6 +6,7 @@ import pytest
 
 from multiedge.research import ResearchStore, build_local_run, build_multica_run
 from multiedge.dashboard import ResearchService
+from multiedge.data import load_daily
 
 
 DATA = Path(__file__).resolve().parent.parent / "data"
@@ -111,3 +112,18 @@ def test_history_lists_metadata_and_loads_full_report_only_on_selection(tmp_path
     run = store.save_run(build_local_run(["GOOGL"], "2025-08-01", DATA))
     assert "results" not in store.runs()[0]
     assert store.get_run(run["run_id"])["results"][0]["report"]["chart"]["dates"]
+
+
+def test_replay_new_price_snapshot_recomputes_history_in_new_account(tmp_path, monkeypatch):
+    service = ResearchService(DATA, tmp_path)
+    run = service.store.save_run(build_local_run(["GOOGL"], "2025-08-01", DATA))
+    googl = load_daily(DATA / "GOOGL_2023-06-01_2025-08-08.csv").loc["2025-08-01":]
+    spx = load_daily(DATA / "SPX_2023-06-01_2025-08-08.csv").loc["2025-08-01":]
+    monkeypatch.setattr("multiedge.dashboard.latest_complete_date", lambda: "2025-08-08")
+    monkeypatch.setattr("multiedge.dashboard.cached_frames", lambda *a: {"GOOGL": googl.drop("2025-08-04"), "SPX": spx})
+    first = service.paper(run["run_id"], mode="replay")
+    assert first["orders"][0]["reason"] == "missing_entry_bar"
+    monkeypatch.setattr("multiedge.dashboard.cached_frames", lambda *a: {"GOOGL": googl, "SPX": spx})
+    second = service.paper(run["run_id"], mode="replay")
+    assert second["account_id"] != first["account_id"]
+    assert second["orders"][0]["status"] == "filled"

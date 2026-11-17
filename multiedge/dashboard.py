@@ -1,5 +1,6 @@
 """研究平台应用逻辑。HTTP 只接收明确的研究配置，不接受任意路径或命令。"""
 import fcntl
+import hashlib
 import json
 from dataclasses import fields
 from datetime import datetime, timedelta, timezone
@@ -123,10 +124,12 @@ class ResearchService:
             account_id = f"{mode}-{'baseline' if not profile_id else profile_id}-{digest(scope)[:10]}"
             if mode == "replay":
                 account_id += f"-{run_id}"
-            try:
-                old = self.store.get_paper(account_id)
-            except KeyError:
-                old = None
+            old = None
+            if mode == "forward":
+                try:
+                    old = self.store.get_paper(account_id)
+                except KeyError:
+                    pass
             observations = {o["signal_id"]: o["observed_at"] for o in (old or {}).get("orders", [])}
             profile_time = self.store.get_profile(profile_id)["created_at"] if profile_id else run["imported_at"]
             first_seen = max((run["imported_at"], profile_time, utc_now()), key=lambda s: datetime.fromisoformat(s.replace("Z", "+00:00")))
@@ -155,6 +158,10 @@ class ResearchService:
                 raise ValueError("行情截止日早于账户最新记录")
             if old and old.get("provider_id", "marketwatch") != run.get("data_snapshot", {}).get("provider_id", "marketwatch"):
                 raise ValueError("前向账户不能混用行情源，请建立独立账户")
+            price_fingerprint = digest({"as_of": as_of, "prices": {ticker: hashlib.sha256(frame.loc[:as_of].to_csv().encode()).hexdigest() for ticker, frame in frames.items()}})
+            if mode == "replay":
+                # 回放按不可变数据版本重新计算；补齐旧行情不能沿用已跳过历史的前向恢复逻辑。
+                account_id += "-" + price_fingerprint[:12]
             for ticker in tickers:
                 frame = frames.get(ticker)
                 if frame is not None and any(run["as_of"] < event["date"] <= as_of for event in frame.attrs.get("splits", [])):
@@ -173,6 +180,7 @@ class ResearchService:
                            "provider_id": run.get("data_snapshot", {}).get("provider_id", "marketwatch"),
                            "engine_revision": run.get("engine_revision"),
                            "price_basis": run.get("data_snapshot", {}).get("price_basis"),
+                           "price_fingerprint": price_fingerprint,
                            "price_snapshots": {ticker: frame.attrs.get("snapshots", []) for ticker, frame in frames.items()},
                            "data_missing": sorted(tickers - set(frames))})
             return self.store.save_paper(result)
