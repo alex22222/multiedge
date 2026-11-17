@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Multi-Edge after the U.S. market close
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 18:30:00 America/New_York
+AccuracySec=1min
+Persistent=true
+Unit=multiedge-daily.service
+
+[Install]
+WantedBy=timers.target

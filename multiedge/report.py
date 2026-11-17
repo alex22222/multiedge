@@ -245,7 +245,12 @@ def render_report(ticker, as_of, cfg=None, data_dir="data", start=None):
         df = fetch_daily_chunked(ticker, start, as_of, data_dir)
         spx = fetch_daily_chunked("SPX", start, as_of, data_dir)
     r = analyze(df, spx, ticker, as_of, cfg, with_chart=True)
+    return render_snapshot(r, cfg)
 
+
+def render_snapshot(r, cfg=None, source_note=""):
+    """直接呈现保存的引擎输出；缺少原始行情时不补算图表。"""
+    cfg = cfg or Config()
     vc = {"BUY": ("#16a34a", "可买入点（初步信号）"), "WATCH": ("#d97706", "观察（条件未齐）"),
           "NO": ("#dc2626", "不出现买入点")}[r.verdict]
     rows_check = "".join(
@@ -317,6 +322,7 @@ def render_report(ticker, as_of, cfg=None, data_dir="data", start=None):
 </details>'''
 
     failed = [c["label"] for c in r.checklist if not c["ok"]]
+    chart_html = (f'<h2>价格图（近 {len(r.chart["dates"])} 个交易日）</h2>' + render_chart(r.chart, r.close)) if r.chart else '<h2>价格图待补充</h2><p class="muted">原始附件没有图表与行情快照，本页仅展示已取得的引擎输出。</p>'
     if r.verdict == "BUY":
         why_not = '<p class="muted">全部买入前提通过。</p>'
     else:
@@ -352,6 +358,7 @@ a{{color:#38bdf8}}
 
 <div class="card">
 <h1>{esc(r.ticker)} · 多趋势验证买入系统报告</h1>
+<p class="muted">{esc(source_note)}</p>
 <div>截止日 <b>{r.as_of}</b> ｜ 收盘 <b class="num">{r.close:.2f}</b></div>
 <p><span class="verdict">{r.verdict}</span> <span class="muted">{vc[1]}</span></p>
 {why_not}
@@ -365,8 +372,7 @@ a{{color:#38bdf8}}
 </div>
 
 <div class="card">
-<h2>价格图（近 {len(r.chart["dates"])} 个交易日）</h2>
-{render_chart(r.chart, r.close)}
+{chart_html}
 </div>
 
 <div class="card">

@@ -39,6 +39,9 @@ def fetch_daily(symbol: str, start: str, end: str, cache_dir: str = "data",
     safe = symbol.upper().replace("^", "")
     path = Path(cache_dir) / f"{safe}_{start}_{end}.csv"
     if not path.exists():
+        cached = load_cached_daily(symbol, start, end, cache_dir)
+        if cached is not None:
+            return cached
         req = urllib.request.Request(mw_url(symbol, start, end), headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=60) as resp:
             payload = resp.read().decode()
@@ -55,6 +58,10 @@ def fetch_daily_chunked(symbol: str, start: str, end: str, cache_dir: str = "dat
 
     200MA 等长周期指标需要 ≥330 根数据才能覆盖图表窗口，故报告/长窗分析应使用本函数。
     """
+    cached = load_cached_daily(symbol, start, end, cache_dir)
+    if cached is not None:
+        return cached
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
     from datetime import timedelta
     s0 = datetime.strptime(start, "%Y-%m-%d")
     e0 = datetime.strptime(end, "%Y-%m-%d")
@@ -83,6 +90,26 @@ def fetch_daily_chunked(symbol: str, start: str, end: str, cache_dir: str = "dat
     full = Path(cache_dir) / f"{safe}_{start}_{end}.csv"
     full.write_text(_to_csv(out), encoding="utf-8")
     return out
+
+
+def load_cached_daily(symbol: str, start: str, end: str, cache_dir: str = "data"):
+    """复用实际覆盖请求区间的缓存；返回截止日切片，不使用文件名推断真实起点。"""
+    safe = symbol.upper().replace("^", "")
+    begin, finish = pd.Timestamp(start), pd.Timestamp(end)
+    # 周末请求对应上一个周五；交易所假日若无覆盖仍走原获取路径。
+    expected_end = finish - pd.Timedelta(days=max(0, finish.weekday() - 4))
+    candidates = []
+    for path in sorted(Path(cache_dir).glob(f"{safe}_*.csv")):
+        frame = load_daily(path)
+        if frame.empty or frame.index[-1] < expected_end:
+            continue
+        if frame.index[0] > begin + pd.Timedelta(days=7):
+            continue
+        sliced = frame.loc[start:end].copy()
+        if not sliced.empty:
+            sliced.attrs["source_path"] = str(path)
+            candidates.append(sliced)
+    return max(candidates, key=len) if candidates else None
 
 
 def _to_csv(df: pd.DataFrame) -> str:

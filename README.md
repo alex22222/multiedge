@@ -44,6 +44,17 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 页面上的数字都来自引擎输出，渲染层不会重新计算指标或判定。
 
+## 服务器研究台与 Paper
+
+新增研究台展示任务来源、冻结候选池、单股认知/直觉/技术三层证据、独立 Paper 账户及 RSI/MACD 指标实验。先初始化历史验收样例：
+
+```bash
+.venv/bin/python -m multiedge.jobs seed --data-dir data --state-dir state
+.venv/bin/python -m multiedge.app --state-dir state
+```
+
+原始判定规则保持冻结。历史回放与前向 Paper 分开记录；服务器新增 Yahoo 数据源与原始 MarketWatch 验收缓存分别留档。详细口径、验证边界和任务导入见 [研究平台说明](docs/RESEARCH_PLATFORM.md)，部署见 [部署说明](deploy/README.md)。
+
 ## 文档
 
 - `PRD.md`：需求、买入判定规则，以及视频之外的操作化假设
