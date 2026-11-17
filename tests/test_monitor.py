@@ -101,3 +101,12 @@ def test_concurrent_enqueue_after_fetch_cutoff_is_not_rewound(queued, monkeypatc
     saved = service.store.get_paper(account["account_id"])
     assert saved["state"]["last_checked_at"] == "2025-08-04T13:35:01+00:00"
     assert saved["positions"] == []
+
+
+def test_web_percentage_rounding_reuses_existing_automatic_account(queued):
+    service, account = queued
+    repeated = service.paper(account["run_id"], mode="forward", exit_mode="fixed_percent",
+                             risk_fraction=.35 / 100, stop_loss_pct=.03, take_profit_pct=.25)
+    assert repeated["account_id"] == account["account_id"]
+    assert len(service.store.papers()) == 1
+    assert len(repeated["orders"]) == 1

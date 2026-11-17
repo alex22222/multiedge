@@ -191,6 +191,14 @@ class ResearchService:
             if not 0 < stop_loss_pct < 1 or not 0 < take_profit_pct <= 10:
                 raise ValueError("止损比例须在0到100%之间，止盈须大于0且不超过1000%")
             config.update({"exit_mode": exit_mode, "stop_loss_pct": stop_loss_pct, "take_profit_pct": take_profit_pct})
+            # 网页百分比除以100会产生浮点尾差；同一参数应复用同一账户。
+            for key in ("initial_cash", "risk_fraction", "fee_bps", "slippage_bps", "stop_loss_pct", "take_profit_pct"):
+                value = config[key]
+                if not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value):
+                    number = float(format(value, ".15g"))
+                    config[key] = int(number) if number.is_integer() else number
+            initial_cash, risk_fraction, fee_bps, slippage_bps, stop_loss_pct, take_profit_pct = (
+                config[k] for k in ("initial_cash", "risk_fraction", "fee_bps", "slippage_bps", "stop_loss_pct", "take_profit_pct"))
         elif stop_loss_pct is not None or take_profit_pct is not None:
             raise ValueError("结构出场方案不接受固定百分比参数")
         execution_model = execution_model or ("intraday_5m" if mode == "forward" and exit_mode == "fixed_percent" else "daily_ohlc")
