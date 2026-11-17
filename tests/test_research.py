@@ -104,3 +104,10 @@ def test_new_empty_forward_account_has_no_pre_registration_equity_history(tmp_pa
     monkeypatch.setattr("multiedge.dashboard.utc_now", lambda: "2026-11-18T01:00:00+00:00")
     result = service.paper(run["run_id"], mode="forward")
     assert result["orders"] == [] and result["equity_curve"] == []
+
+
+def test_history_lists_metadata_and_loads_full_report_only_on_selection(tmp_path):
+    store = ResearchStore(tmp_path)
+    run = store.save_run(build_local_run(["GOOGL"], "2025-08-01", DATA))
+    assert "results" not in store.runs()[0]
+    assert store.get_run(run["run_id"])["results"][0]["report"]["chart"]["dates"]

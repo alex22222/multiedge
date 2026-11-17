@@ -150,7 +150,10 @@ class ResearchStore:
         return run
 
     def runs(self):
-        return sorted(self._list("run"), key=lambda x: (x["as_of"], x.get("imported_at", "")), reverse=True)
+        # 日扫描历史只加载元数据；图表与明细在选中快照后按需读取，限制常驻内存。
+        with self._db() as db:
+            rows = db.execute("SELECT json_remove(payload,'$.results') FROM records WHERE kind='run'").fetchall()
+        return sorted((json.loads(row[0]) for row in rows), key=lambda x: (x["as_of"], x.get("imported_at", "")), reverse=True)
 
     def save_profile(self, config):
         from .experiments import ExperimentConfig
