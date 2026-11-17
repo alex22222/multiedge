@@ -248,7 +248,7 @@ def render_report(ticker, as_of, cfg=None, data_dir="data", start=None):
     return render_snapshot(r, cfg)
 
 
-def render_snapshot(r, cfg=None, source_note=""):
+def render_snapshot(r, cfg=None, source_note="", price_source="MarketWatch 日线（未复权）"):
     """直接呈现保存的引擎输出；缺少原始行情时不补算图表。"""
     cfg = cfg or Config()
     vc = {"BUY": ("#16a34a", "可买入点（初步信号）"), "WATCH": ("#d97706", "观察（条件未齐）"),
@@ -401,7 +401,7 @@ a{{color:#38bdf8}}
 <p class="muted">对应关系与取值理由：PRD.md「操作化假设清单」表（Config 每个字段均有独立一行）。</p>
 </details>
 
-<p class="muted">生成：multiedge.report ｜ 数据：MarketWatch 日线（未复权）｜ {DISCLAIMER}</p>
+<p class="muted">生成：multiedge.report ｜ 数据：{esc(price_source)}｜ {DISCLAIMER}</p>
 </div></body></html>'''
     return html_doc, r
 

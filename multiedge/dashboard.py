@@ -87,7 +87,8 @@ class ResearchService:
             raise ValueError("尚未取得该标的的原始引擎产物")
         allowed = {f.name for f in fields(Report)}
         report = Report(**{k: v for k, v in row["report"].items() if k in allowed})
-        return render_snapshot(report, source_note=f"来源：{run['source']}；任务状态：{run['status']}；截止：{run['as_of']}。本页呈现保存的输出，是否独立复跑请查看验证说明。")[0]
+        source = run.get("data_snapshot", {})
+        return render_snapshot(report, source_note=f"来源：{run['source']}；任务状态：{run['status']}；截止：{run['as_of']}。本页呈现保存的输出，是否独立复跑请查看验证说明。", price_source=f"{source.get('provider', '待核验')} · {source.get('price_basis', '口径待核验')}")[0]
 
     def experiment(self, run_id, profile_id):
         run = self.store.get_run(run_id)

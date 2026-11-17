@@ -7,6 +7,7 @@ from multiedge.config import Config
 from multiedge.data import load_daily
 from multiedge.engine import analyze
 from multiedge.report import render_report
+from multiedge.report import render_snapshot
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
@@ -97,3 +98,12 @@ def test_googl_no_report_and_nvda_unavailable_stop():
     gate = [c for c in r_nv.checklist if c["key"] == "no_negation"][0]
     assert gate["actual"] == "0 条", f"否定条件应只统计真否定项，实际 {gate['actual']}"
     assert "止损锚不可用" not in doc_nv.split("风险 / 否定条件")[0].split("无否定条件")[-1]
+
+
+def test_snapshot_report_identifies_its_actual_data_source():
+    df = load_daily(DATA / "GOOGL_2023-06-01_2025-08-08.csv")
+    spx = load_daily(DATA / "SPX_2023-06-01_2025-08-08.csv")
+    r = analyze(df, spx, "GOOGL", "2025-08-01")
+    doc, _ = render_snapshot(r, price_source="Yahoo chart OHLC Close; Adj Close unused")
+    assert "Yahoo chart OHLC Close" in doc
+    assert "数据：MarketWatch" not in doc

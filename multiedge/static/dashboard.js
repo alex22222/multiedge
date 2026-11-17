@@ -209,6 +209,8 @@ function renderOverview() {
   $('source-facts').replaceChildren();
   addFact($('source-facts'), '分析截止日', dateLabel(run?.as_of));
   addFact($('source-facts'), '来源', sourceLabel(run));
+  addFact($('source-facts'), '行情来源', run?.data_snapshot?.provider || '待核验');
+  addFact($('source-facts'), '价格口径', run?.data_snapshot?.price_basis || '待核验');
   addFact($('source-facts'), '快照状态', humanStatus(run?.status));
   addFact($('source-facts'), '载入时间 · 北京', dateLabel(run?.imported_at, true));
   const issue = safeURL(run?.issue_url);
