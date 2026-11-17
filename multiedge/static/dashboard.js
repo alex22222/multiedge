@@ -15,7 +15,7 @@ const edgeLabels = {
   trendline: '冻结趋势线', rs: '相对强度 RS', market_structure: '市场结构',
 };
 const statusLabels = {
-  in_review: '待独立复核', partial: '部分明细', imported: '已导入快照', source_snapshot: '来源快照',
+  in_review: '任务待复审', partial: '部分明细', imported: '已导入快照', source_snapshot: '来源快照',
   snapshot: '来源快照', complete: '已完成', completed: '已完成', succeeded: '已完成',
   failed: '失败', error: '错误', pending: '等待数据', running: '进行中', unverified: '未核验',
   verified: '有核验证据', available: '有数据', computed: '已计算', missing: '待补证据',
@@ -221,7 +221,10 @@ function renderOverview() {
     $('issue-link').removeAttribute('target');
     $('issue-link').removeAttribute('rel');
   }
-  $('overview-source-note').textContent = run?.claimed_counts ? '卡片仅展示已取得明细；上方 BUY / WATCH / NO 数量来自任务汇总，尚未全池复现。' : '卡片展示实际载入的股票明细。';
+  const replayed = run?.config_verified && !partial && rows.length > 0 && rows.every((row) => row.report_available);
+  $('overview-source-note').textContent = replayed
+    ? '完整明细与行情已取得；全部关键判定字段经独立复跑一致。原任务的复审状态单独保留。'
+    : (run?.claimed_counts ? '卡片仅展示已取得明细；上方 BUY / WATCH / NO 数量来自任务汇总，独立复跑范围见验证说明。' : '卡片展示实际载入的股票明细。');
   const featured = rows.filter((row) => ['BUY', 'WATCH', 'NO'].includes(verdict(row))).sort((a, b) => ({ BUY: 0, WATCH: 1, NO: 2 }[verdict(a)] ?? 3) - ({ BUY: 0, WATCH: 1, NO: 2 }[verdict(b)] ?? 3)).slice(0, 4);
   $('overview-candidates').replaceChildren();
   for (const row of featured) {
