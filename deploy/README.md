@@ -86,7 +86,7 @@ Daily prices are obtained from the account's verified provider/cache independent
 
 Inspect `trailing_policy`, `stop_updates` and `stop_adjustments` in the Paper account. `pending` is a proposal, not an applied change; `applied`, `no_change` and `position_closed` distinguish outcomes. An applied record must retain old/new prices, source day and completion time, actual observation, requested and actual effective times, processing time, indicator/confirmed-pivot evidence, source fingerprints and policy version. The dashboard shows initial/current stops and the full adjustment audit; zero adjustments must remain explicit when no raise has become effective.
 
-Before recording acceptance, back up persistent state, verify actual activation of existing open structural holdings, preservation of original risk/history and the disabled examples, then check one real monitor run, both timers, the source/proposal/application distinctions and browser evidence. The current implementation and local regression results are not a substitute for those pending server receipts.
+Before recording acceptance, back up persistent state, verify actual activation of existing open structural holdings, preservation of original risk/history and the disabled examples, then check one real monitor run, both timers, the source/proposal/application distinctions and browser evidence. Release `67b6b6b` passed 262 tests locally and on the VPS; its live activation, two prospective stop adjustments, actual-open Paper exits and independent accounting/browser checks are recorded in `docs/2026-11-18-DEPLOYMENT.md` (fourth iteration).
 
 ## Inspect and roll back
 
