@@ -21,6 +21,8 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from .pnl import record_daily_mark
+
 
 def _date(value):
     return date.fromisoformat(str(value)).isoformat()
@@ -328,6 +330,8 @@ Orders at the same open are allocated deterministically by date/ticker/id.
                 _close(state, position, position["target"], day, "target", fees, slip)
             else:
                 position["mark"], position["mark_date"] = bar["Close"], day
+                record_daily_mark(state, position, price=bar["Close"], timestamp=day,
+                                  interval="1d")
         for position in state["positions"]:
             position["stale"] = position["mark_date"] < day
         state["equity_curve"].append({"date": day, "cash": state["cash"], "equity": _equity(state),
@@ -349,7 +353,8 @@ Orders at the same open are allocated deterministically by date/ticker/id.
     return {"state": state, "mode": mode, "as_of": as_of, "cash": state["cash"], "equity": equity,
             "start_date": state.get("start_date"),
             "positions": state["positions"], "orders": state["orders"], "trades": state["trades"],
-            "events": state["events"], "equity_curve": state["equity_curve"], "metrics": metrics,
+            "events": state["events"], "equity_curve": state["equity_curve"],
+            "daily_marks": state.get("daily_marks", []), "metrics": metrics,
             "calendar_source": calendar_source, "data_as_of": data_as_of,
             "data_stale": data_as_of != as_of,
             "exit_mode": exit_mode, "planned_stop_pct": stop_loss_pct, "planned_target_pct": take_profit_pct,

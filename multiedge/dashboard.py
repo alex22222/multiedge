@@ -92,6 +92,17 @@ class ResearchService:
         self.data_dir = Path(data_dir)
         self.store = ResearchStore(state_dir)
 
+    def _paper_view(self, account):
+        from .pnl import build_daily_pnl
+        from .pnl_archive import archived_daily_marks
+        marks, sessions, issues = archived_daily_marks(account, self.store.root / "intraday_quotes")
+        report = build_daily_pnl(account, archived_marks=marks, sessions=sessions)
+        report["notes"] = [*report["notes"], *issues]
+        return {**account, "daily_pnl": report}
+
+    def paper_account(self, account_id):
+        return self._paper_view(self.store.get_paper(account_id))
+
     def state(self):
         runs = self.store.runs()
         summary_keys = ("run_id", "as_of", "source", "status", "counts", "claimed_counts", "expected_count", "result_count", "coverage", "issue_url", "imported_at")
@@ -101,7 +112,7 @@ class ResearchService:
         monitor_file = self.store.root / "last-paper-monitor.json"
         return {"runs": [{k: r.get(k) for k in summary_keys} for r in runs],
                 "active_run": self.store.get_run(runs[0]["run_id"]) if runs else None,
-                "profiles": self.store.profiles(), "paper_accounts": self.store.papers(),
+                "profiles": self.store.profiles(), "paper_accounts": [self._paper_view(account) for account in self.store.papers()],
                 "validation": validation,
                 "last_job": json.loads(job_file.read_text()) if job_file.exists() else None,
                 "paper_automation": {"execution_model": "intraday_5m", "interval_seconds": 300,

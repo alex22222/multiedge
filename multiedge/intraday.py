@@ -19,6 +19,8 @@ import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo
 
+from .pnl import record_daily_mark
+
 
 NY = ZoneInfo("America/New_York")
 UTC = timezone.utc
@@ -468,6 +470,9 @@ verify upstream that the signal itself used completed daily data.
             else:
                 position.update(mark=value["close"], mark_date=_day(_stamp(value["end"])),
                                 mark_timestamp=value["end"], mark_session_end=value["session_end"])
+                record_daily_mark(state, position, price=value["close"], timestamp=value["end"],
+                                  session_end=value["session_end"], recorded_at=now_text,
+                                  source_sha256=value.get("source_sha256"), content_sha256=value["content_sha256"])
         ending = max(value["end"] for value in group.values())
         for ticker, value in group.items():
             state["last_bar_at"][ticker] = value["timestamp"]
@@ -510,7 +515,8 @@ verify upstream that the signal itself used completed daily data.
             "started_at": state["started_at"], "last_checked_at": now_text, "data_as_of": latest, "data_stale": data_stale,
             "wallclock_age_seconds": (now_stamp - _stamp(latest)).total_seconds() if latest else None,
             "cash": state["cash"], "equity": equity, "config": config, "coverage_gaps": state["coverage_gaps"],
-            **{key: state[key] for key in ("positions", "orders", "trades", "events", "equity_curve")}, "metrics": metrics,
+            **{key: state[key] for key in ("positions", "orders", "trades", "events", "equity_curve")},
+            "daily_marks": state.get("daily_marks", []), "metrics": metrics,
             **({key: state[key] for key in ("trailing_policy", "stop_updates", "stop_adjustments")} if policy is not None else {}),
             "assumptions": ["真实完整5分钟K线模拟，不是交易所逐笔成交", "BUY只在下一实际交易日首次登记后的K线开盘模拟入场",
                             "登记前不补买；超过下一交易日的信号作废",

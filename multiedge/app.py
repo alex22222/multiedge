@@ -116,7 +116,7 @@ def make_handler(data_dir="data", start=None, state_dir="state"):
                     elif u.path == "/api/stock":
                         result = service.stock(q["run_id"], q["ticker"])
                     elif u.path == "/api/paper":
-                        result = service.store.get_paper(q["id"])
+                        result = service.paper_account(q["id"])
                     else:
                         raise KeyError("接口不存在")
                     self._json(result)

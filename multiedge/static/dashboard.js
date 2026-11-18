@@ -52,6 +52,7 @@ let workspace = { runs: [], profiles: [], paper_accounts: [] };
 let activeRun = null;
 let candidateFilter = 'ALL';
 let selectedPaper = null;
+let paperPnlAccountId = null;
 let loadSequence = 0;
 let toastTimer;
 
@@ -565,6 +566,74 @@ function paperTickerCell(record) {
   return cell;
 }
 
+function paperPnlCell(value, unavailable = '—') {
+  return node('td', numeric(value) ? (Number(value) >= 0 ? 'positive numeric' : 'negative numeric') : 'numeric', numeric(value) ? money(value) : unavailable);
+}
+
+function renderPaperDailyPnl(data) {
+  const report = data.daily_pnl || {};
+  const rows = [...(Array.isArray(report.rows) ? report.rows : [])].sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(a.ticker).localeCompare(String(b.ticker)));
+  const changedAccount = paperPnlAccountId !== (data.account_id || null);
+  paperPnlAccountId = data.account_id || null;
+  for (const [id, key, label] of [['paper-pnl-ticker', 'ticker', '全部股票'], ['paper-pnl-date', 'date', '全部交易日']]) {
+    const select = $(id);
+    const previous = changedAccount ? '' : select.value;
+    const values = [...new Set(rows.map((row) => row[key]).filter(Boolean))].sort();
+    if (key === 'date') values.reverse();
+    const all = node('option', '', label);
+    all.value = '';
+    select.replaceChildren(all);
+    for (const value of values) {
+      const option = node('option', '', value);
+      option.value = value;
+      select.append(option);
+    }
+    if (values.includes(previous)) select.value = previous;
+    select.disabled = !rows.length;
+  }
+  const ticker = $('paper-pnl-ticker').value;
+  const day = $('paper-pnl-date').value;
+  const visible = rows.filter((row) => (!ticker || row.ticker === ticker) && (!day || row.date === day));
+  const summaries = (Array.isArray(report.summaries) ? report.summaries : []).filter((row) => !ticker || row.ticker === ticker);
+  $('paper-pnl-summaries').replaceChildren();
+  for (const summary of summaries) {
+    const card = node('div', 'paper-pnl-summary');
+    card.append(node('span', '', `${summary.ticker} · ${summary.status === 'closed' ? '已平仓' : '持仓中'} · 累计净盈亏`));
+    card.append(node('strong', numeric(summary.cumulative_pnl) ? (Number(summary.cumulative_pnl) >= 0 ? 'positive' : 'negative') : '', money(summary.cumulative_pnl)));
+    card.append(node('small', '', `最近交易日 ${dateLabel(summary.date)} · 当日 ${numeric(summary.daily_pnl) ? money(summary.daily_pnl) : '不可计算'}`));
+    if (summary.quality === 'partial' || summary.quality === 'missing') card.append(node('small', 'warm', summary.quality === 'partial' ? '截至有效行情，未完成日终' : '数据有缺口，详见每日明细'));
+    $('paper-pnl-summaries').append(card);
+  }
+  $('paper-pnl-summaries').hidden = !summaries.length;
+  const stockCount = new Set(rows.map((row) => row.ticker)).size;
+  $('paper-daily-count').textContent = `${stockCount} 只股票 · ${visible.length} / ${rows.length} 条每日记录`;
+  const notes = Array.isArray(report.notes) ? report.notes : [];
+  $('paper-daily-note').textContent = notes.join('。');
+  $('paper-daily-note').hidden = !notes.length;
+  const body = $('paper-daily-body');
+  body.replaceChildren();
+  const basisLabels = { paper_ledger: '实际 Paper 估值', archive_reconstruction: '依据已归档行情重建', trade_ledger: '成交台账', mixed: '台账与归档行情' };
+  for (const row of visible) {
+    const tr = node('tr');
+    const stock = node('td', 'ticker-cell', row.ticker);
+    stock.append(node('small', '', row.status === 'closed' ? '已平仓' : '持仓中'));
+    const components = node('td', 'paper-price-cell', money(row.realized_pnl));
+    components.append(node('small', 'check-detail', `未实现 ${money(row.unrealized_pnl)}`));
+    const quality = node('td', 'cell-note');
+    quality.append(badge(row.quality === 'complete' ? (row.status === 'closed' ? '当日已平仓' : '日终已完成') : row.quality === 'partial' ? '未完成日终' : '数据有缺口', row.quality === 'complete' ? 'muted' : 'amber'));
+    quality.append(node('small', 'check-detail', basisLabels[row.basis] || row.basis || '依据未提供'));
+    if (row.missing_reason) quality.append(node('small', 'check-detail', row.missing_reason));
+    tr.append(node('td', 'numeric', dateLabel(row.date)), stock, paperPnlCell(row.daily_pnl, '不可计算'), paperPnlCell(row.cumulative_pnl), components, node('td', 'numeric', money(row.fees)), node('td', 'numeric', `${fmt(row.quantity)} 股`), paperPriceCell(row.mark, row.mark_at), quality);
+    body.append(tr);
+  }
+  $('paper-daily-empty').hidden = visible.length > 0;
+  $('paper-daily-empty').textContent = rows.length
+    ? '当前筛选下没有每日盈亏记录。'
+    : selectedPaper && ((data.positions || []).length || (data.trades || []).length)
+      ? '尚未取得可用的逐股每日估值；历史缺口不会显示为零收益。'
+      : '模拟成交后，在这里查看每只股票的逐日盈亏；未成交订单不计入盈亏。';
+}
+
 function paperStopUpdateDetails(update) {
   const evidence = update.evidence || {};
   const details = node('details', 'paper-risk-details paper-trailing-details');
@@ -699,6 +768,7 @@ function renderPaper() {
   if (selectedPaper && !positions.length && !trades.length) gaps.push('尚无模拟成交记录，当前资金不代表策略验证收益');
   $('paper-data-note').hidden = !gaps.length;
   $('paper-data-note').textContent = gaps.join('。');
+  renderPaperDailyPnl(data);
   $('paper-position-note').textContent = `${positions.length} 只持仓${data.automation_disabled ? ' · 停用时快照' : ''}`;
   $('paper-positions-body').replaceChildren();
   for (const position of positions) {
@@ -713,7 +783,10 @@ function renderPaper() {
     stopCell.append(node('small', 'check-detail', `初始止损 ${money(positionPlan.initialStopPrice)}${numeric(positionPlan.stop) ? ` · 初始风险 ${fmt(Number(positionPlan.stop) * 100)}%` : ''}`));
     const riskDetails = paperRiskDetails(position);
     if (riskDetails) stopCell.append(riskDetails);
-    tr.append(paperTickerCell(position), paperPriceCell(position.entry_price, position.entry_timestamp || position.entry_time || position.entry_at || position.entry_date), paperPriceCell(position.mark, position.mark_timestamp || position.mark_time || position.mark_at || position.mark_date), stopCell, paperPriceCell(position.target, null, targetNote), node('td', '', numeric(positionPlan.rr) ? `${fmt(positionPlan.rr)}R` : '不可评估'), status);
+    const floating = ['quantity', 'mark', 'entry_price', 'entry_fee'].every((key) => numeric(position[key])) ? Number(position.quantity) * (Number(position.mark) - Number(position.entry_price)) - Number(position.entry_fee) : null;
+    const floatingCell = paperPnlCell(floating);
+    floatingCell.append(node('small', 'check-detail', '已扣买入费用；未扣预计卖出费用'));
+    tr.append(paperTickerCell(position), paperPriceCell(position.entry_price, position.entry_timestamp || position.entry_time || position.entry_at || position.entry_date), paperPriceCell(position.mark, position.mark_timestamp || position.mark_time || position.mark_at || position.mark_date), floatingCell, stopCell, paperPriceCell(position.target, null, targetNote), node('td', '', numeric(positionPlan.rr) ? `${fmt(positionPlan.rr)}R` : '不可评估'), status);
     $('paper-positions-body').append(tr);
   }
   $('paper-positions-empty').hidden = positions.length > 0;
@@ -1107,6 +1180,7 @@ $('paper-form').addEventListener('submit', async (event) => {
   }
 });
 $('paper-exit-mode').addEventListener('change', renderPaperFormPlan);
+for (const id of ['paper-pnl-ticker', 'paper-pnl-date']) $(id).addEventListener('change', () => renderPaperDailyPnl(paperLedger(selectedPaper)));
 for (const name of ['stop_loss_percent', 'take_profit_percent']) $('paper-form').elements[name].addEventListener('input', renderPaperFormPlan);
 $('paper-account-select').addEventListener('change', async () => {
   const id = $('paper-account-select').value;
