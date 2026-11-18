@@ -19,7 +19,7 @@ def source(tmp_path, monkeypatch):
     run["imported_at"] = "2025-08-01T22:00:00+00:00"
     service.store.save_run(run)
     monkeypatch.setattr("multiedge.dashboard.utc_now", lambda: "2025-08-01T22:00:00+00:00")
-    monkeypatch.setattr("multiedge.dashboard.latest_complete_date", lambda: "2025-08-01")
+    monkeypatch.setattr("multiedge.dashboard.latest_complete_date", lambda now=None: "2025-08-01")
     return service, run
 
 
