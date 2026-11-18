@@ -91,6 +91,33 @@ def test_daily_enrolls_new_version_without_rewriting_legacy_intraday_account(tmp
     assert v2["started_at"] == "2025-08-04T22:00:00+00:00"
 
 
+def test_legacy_default_daily_account_finishes_existing_orders_without_new_buy_enrollment(tmp_path, monkeypatch):
+    monkeypatch.setattr(ResearchService, "monitor_paper", lambda *a, **k: {"status": "no_active_orders"})
+    monkeypatch.setattr("multiedge.dashboard.latest_complete_date", lambda now=None: "2025-08-01")
+    monkeypatch.setattr("multiedge.dashboard.utc_now", lambda: "2025-08-01T22:00:00+00:00")
+    service = ResearchService(DATA, tmp_path)
+    source = build_local_run(["GOOGL"], "2025-08-01", DATA)
+    source["imported_at"] = "2025-08-01T22:00:00+00:00"
+    service.store.save_run(source)
+    legacy = service.paper(source["run_id"], mode="forward", execution_model="daily_ohlc")
+    original_signal = legacy["orders"][0]["signal_id"]
+    universe = tmp_path / "universe.json"
+    universe.write_text(json.dumps(["GOOGL"]))
+    monkeypatch.setattr("multiedge.jobs.latest_complete_date", lambda: "2025-08-04")
+    monkeypatch.setattr("multiedge.dashboard.latest_complete_date", lambda now=None: "2025-08-04")
+    monkeypatch.setattr("multiedge.dashboard.utc_now", lambda: "2025-08-04T22:00:00+00:00")
+    monkeypatch.setattr("multiedge.research.utc_now", lambda: "2025-08-04T22:00:00+00:00")
+    next_run = build_local_run(["GOOGL"], "2025-08-04", DATA)
+    next_run["results"][0]["verdict"] = "BUY"
+    next_run["results"][0]["report"]["verdict"] = "BUY"
+    monkeypatch.setattr("multiedge.jobs.build_local_run", lambda *a, **k: next_run)
+    daily(DATA, tmp_path, universe, provider="marketwatch")
+    advanced = service.store.get_paper(legacy["account_id"])
+    assert advanced["as_of"] == "2025-08-04"
+    assert advanced["orders"][0]["status"] == "filled"
+    assert [order["signal_id"] for order in advanced["orders"]] == [original_signal]
+
+
 def test_monitor_cli_preserves_partial_status_in_receipt(tmp_path, monkeypatch):
     monkeypatch.setattr(ResearchService, "monitor_paper", lambda *a, **k: {"status": "partial", "errors": {"SPX": "offline"}, "last_checked_at": "2026-11-17T15:00:00+00:00"})
     monkeypatch.setattr("sys.argv", ["multiedge.jobs", "monitor", "--state-dir", str(tmp_path)])

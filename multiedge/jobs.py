@@ -60,7 +60,11 @@ def daily(data_dir, state_dir, universe_path=None, provider="yahoo"):
                     and not account.get("profile_id") and account.get("strategy_version") != STRUCTURAL_V2):
                 continue
             cfg = {**account["config"], "execution_model": account.get("execution_model", "daily_ohlc")}
-            service.paper(run["run_id"], **cfg)
+            legacy_default_daily = (not account.get("profile_id") and cfg["execution_model"] == "daily_ohlc"
+                                    and account.get("exit_mode", "structural") == "structural"
+                                    and all(cfg.get(key) == value for key, value in
+                                            (("initial_cash", 100000), ("risk_fraction", .0035), ("fee_bps", 5), ("slippage_bps", 5))))
+            service.paper(run["run_id"], **cfg, enroll_new=not legacy_default_daily)
     monitor = service.monitor_paper(reconcile=True)
     path = Path(state_dir) / "last-paper-monitor.json"
     temporary = path.with_suffix(".tmp")

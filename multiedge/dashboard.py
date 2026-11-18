@@ -340,7 +340,10 @@ class ResearchService:
         return receipt
 
     def paper(self, run_id, mode="replay", initial_cash=100000, risk_fraction=.0035, fee_bps=5, slippage_bps=5, profile_id=None,
-              exit_mode="structural", stop_loss_pct=None, take_profit_pct=None, execution_model=None, strategy_version=None):
+              exit_mode="structural", stop_loss_pct=None, take_profit_pct=None, execution_model=None, strategy_version=None,
+              enroll_new=True):
+        if not isinstance(enroll_new, bool):
+            raise ValueError("新增候选开关必须为布尔值")
         run = self.store.get_run(run_id)
         if mode == "forward" and run["as_of"] > latest_complete_date():
             raise ValueError("信号日期晚于最近完整交易日")
@@ -382,8 +385,8 @@ class ResearchService:
         # 进程间锁保护定时任务与网页对同一账户的读-改-写。
         with (self.store.root / "paper.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            selected = {r["ticker"] for r in run["results"] if r["verdict"] == "BUY"}
-            if profile_id:
+            selected = {r["ticker"] for r in run["results"] if r["verdict"] == "BUY"} if enroll_new else set()
+            if profile_id and enroll_new:
                 selected = {r["ticker"] for r in self.experiment(run_id, profile_id)["results"] if r["verdict"] == "BUY"}
             scope = {"config": config, "provider_id": run.get("data_snapshot", {}).get("provider_id", "marketwatch"), "engine_revision": run.get("engine_revision")}
             account_id = f"{mode}-{'baseline' if not profile_id else profile_id}-{digest(scope)[:10]}"
