@@ -46,6 +46,22 @@ const paperLabels = {
   trailing_stop: '触及移动止损', trailing_stop_gap: '跳空穿越移动止损',
   trailing_stop_and_target: '同根K线触及移动止损与目标，按止损优先处理',
   stop_and_target: '同一行情区间触及止损与目标，按止损优先处理',
+  waiting_retest: '等待回踩支撑区并收复', retest_confirmed: '回踩已确认，等待后续K线开盘复核',
+  waiting_entry_open: '等待确认后的可交易开盘', entry_confirmation: '回踩收复确认',
+  missing_target: '缺少有效前高目标，不新买', invalid_target: '前高目标无效，不新买',
+  confluent_higher_low_confirmed: '入场后更高低点与均线区共同确认，上移同一结构保护位',
+  no_new_confluent_higher_low: '尚无入场后新确认的共振更高低点，保持原保护位',
+  entry_plan_unavailable: '尚无可执行的结构买入计划', entry_plan_mismatch: '买入计划与本账户版本或价位不一致',
+  invalid_daily_plan: '源日行情或结构核验失败，本次不买',
+  signal_not_buy: '源报告未给出原始BUY，v2不升级WATCH或NO', missing_pullback: '缺少本次动能后的回调结构',
+  missing_ma_confluence: '缺少成熟均线与另一结构的同区共振',
+  insufficient_confluence: '缺少至少两类成熟结构共振', support_band_too_wide: '结构价位分散，未形成同区支撑',
+  anchor_outside_support: '本次回调低点偏离支撑共振区', source_below_support: '源日收盘已跌破支撑区',
+  source_above_entry_limit: '源日价格已超过允许入场范围', entry_below_support: '实际开盘已低于支撑区',
+  entry_above_limit: '实际开盘已超过允许入场范围', entry_rr_below_minimum: '实际开盘扣成本后不足3R',
+  reference_rr_below_minimum: '登记参考扣成本后不足3R', entry_price_confirmed: '实际开盘的结构与成本后盈亏比已通过',
+  entry_plan_ready: '结构与参考盈亏比已通过，继续等待回踩确认',
+  retest_coverage_gap: '登记后的回踩行情不连续，本次不买', retest_structure_broken: '登记后支撑结构已跌破，本次不买',
 };
 
 let workspace = { runs: [], profiles: [], paper_accounts: [] };
@@ -507,6 +523,10 @@ function paperLedger(account) {
   return account ? { ...(account.state || {}), ...account } : {};
 }
 
+function paperStrategyVersion(value, account = {}) {
+  return value.strategy_version || value.config?.strategy_version || value.risk_plan?.strategy_version || account.strategy_version || account.config?.strategy_version || '';
+}
+
 function paperPlan(value, account = {}) {
   const config = value.config || account.config || {};
   const mode = value.exit_mode || account.exit_mode || config.exit_mode || 'structural';
@@ -522,15 +542,40 @@ function paperPlan(value, account = {}) {
   const target = mode === 'structural'
     ? (numeric(reference) && Number(reference) > 0 && numeric(targetPrice) ? (Number(targetPrice) - Number(reference)) / Number(reference) : value.planned_target_pct)
     : value.planned_target_pct ?? value.take_profit_pct ?? account.take_profit_pct ?? config.take_profit_pct;
-  const rr = value.planned_rr ?? (numeric(stop) && Number(stop) > 0 && numeric(target) ? Number(target) / Number(stop) : null);
+  const version = paperStrategyVersion(value, account);
+  const rr = version === 'structural_retest_v2' ? value.entry_checks?.net_rr ?? null : value.planned_rr ?? (numeric(stop) && Number(stop) > 0 && numeric(target) ? Number(target) / Number(stop) : null);
   const label = mode === 'fixed_percent'
     ? `自定义比例 · 止损 ${numeric(stop) ? fmt(Number(stop) * 100) : '—'}% / 止盈 ${numeric(target) ? fmt(Number(target) * 100) : '—'}%`
-    : '结构止损 / 前高目标';
-  return { mode, stop, target, rr, label, stopPrice, initialStopPrice, targetPrice, referenceLabel: entry === null ? '按信号收盘价' : '按初始风险' };
+    : version === 'structural_retest_v2' ? '结构回踩确认 v2' : '旧结构版本 · 结构止损 / 前高目标';
+  return { mode, stop, target, rr, label, version, stopPrice, initialStopPrice, targetPrice, referenceLabel: version === 'structural_retest_v2' ? '按实际成交与买卖成本' : entry === null ? '按信号收盘价' : '按初始风险' };
 }
 
 function paperRiskDetails(record) {
   const risk = record.risk_plan;
+  if (risk?.strategy_version === 'structural_retest_v2') {
+    const details = node('details', 'paper-risk-details');
+    details.append(node('summary', '', '查看回踩与统一结构依据'));
+    const list = node('ul', 'evidence-list');
+    const checks = record.entry_checks || {};
+    for (const text of [
+      `源日 ${dateLabel(risk.source_as_of || risk.signal_date)} · 新版本独立登记，不转换旧持仓`,
+      Array.isArray(risk.support_band) && risk.support_band.length === 2 ? `支撑共振带 ${risk.support_band.map(money).join(' – ')}` : '支撑共振带未提供',
+      `本次回调锚 ${money(risk.anchor_price)} · ${dateLabel(risk.anchor_date)}`,
+      `初始结构止损 ${money(risk.stop)} · 前高目标 ${money(risk.target)}`,
+      `ATR ${fmt(risk.atr, 4)} · 价格缓冲 ${money(risk.buffer_value)}`,
+      `登记参考成本后RR ${numeric(risk.reference_net_rr) ? `${fmt(risk.reference_net_rr)}R` : '不可评估'} · 最低 ${fmt(risk.minimum_net_rr || 3)}R`,
+      numeric(checks.net_rr) ? `买入开盘复核成本后RR ${fmt(checks.net_rr)}R` : '实际买入成本后RR尚未确认',
+      `来源快照 ${risk.source_run_id || '未提供'} · 版本 ${risk.strategy_version}`,
+    ]) list.append(node('li', '', text));
+    for (const [key, level] of Object.entries(risk.support_levels || {})) list.append(node('li', '', `${edgeLabels[key] || key} ${money(level)}`));
+    if (numeric(risk.maximum_entry_price)) list.append(node('li', '', `允许入场上限 ${money(risk.maximum_entry_price)} · 回踩收复参考 ${money(risk.confirmation_close)}`));
+    if (risk.source_fingerprint) list.append(node('li', '', `源日行情指纹 ${risk.source_fingerprint}`));
+    if (risk.data_error) list.append(node('li', '', `数据核验：${risk.data_error}`));
+    if (checks.expected_bar_start || checks.available_bar_start) list.append(node('li', '', `需连续行情自 ${paperTime(checks.expected_bar_start)}；实际可用自 ${paperTime(checks.available_bar_start)}`));
+    if (risk.policy_assumption) list.append(node('li', '', risk.policy_assumption));
+    details.append(list);
+    return details;
+  }
   if (!risk || risk.basis !== 'frozen_engine_structure') return null;
   const details = node('details', 'paper-risk-details');
   details.append(node('summary', '', '查看结构价位依据'));
@@ -634,8 +679,64 @@ function renderPaperDailyPnl(data) {
       : '模拟成交后，在这里查看每只股票的逐日盈亏；未成交订单不计入盈亏。';
 }
 
+function renderPaperEntryAudits(data) {
+  const v2 = paperStrategyVersion(data) === 'structural_retest_v2';
+  const audits = Array.isArray(data.entry_audits) ? data.entry_audits : v2 ? (data.orders || []) : [];
+  const rows = [...audits].sort((a, b) => String(b.checked_at || b.observed_at || b.signal_date || '').localeCompare(String(a.checked_at || a.observed_at || a.signal_date || '')));
+  const filled = rows.filter((row) => row.status === 'filled').length;
+  const rejected = rows.filter((row) => row.status === 'skipped' || row.status === 'rejected').length;
+  $('paper-entry-count').textContent = `${rows.length} 个候选 · ${filled} 已成交 / ${rows.length - filled - rejected} 等待 / ${rejected} 拒绝`;
+  $('paper-entry-policy-note').textContent = !selectedPaper
+    ? '选择账户后显示买入前复核规则。'
+    : !v2
+      ? '此账户保留旧版本的原始买入与出场规则；不会把新版本条件追溯应用于已有持仓或历史成交。'
+      : `结构回踩确认 v2 · 每个新候选先核验同区结构与有效前高，完整K线回踩收复后，下一合格开盘重新计算成本后盈亏比，至少 ${fmt(data.entry_policy?.minimum_net_rr || 3)}R 才能模拟买入。初始止损与后续上调沿用同类结构，新旧版本分别记账。${data.entry_policy?.description ? ` ${data.entry_policy.description}` : ''}`;
+  const body = $('paper-entry-body');
+  body.replaceChildren();
+  for (const audit of rows) {
+    const risk = audit.risk_plan || {};
+    const checks = audit.entry_checks || {};
+    const confirmation = checks.confirmation_bar;
+    const tr = node('tr');
+    const stock = node('td', 'ticker-cell', audit.ticker || '—');
+    stock.append(node('small', '', `信号 ${dateLabel(audit.signal_date || risk.source_as_of)}`));
+    const decision = node('td', 'cell-note');
+    const rejectedRow = ['skipped', 'rejected'].includes(audit.status);
+    const status = audit.status === 'filled' ? '已模拟买入' : rejectedRow ? '拒绝本次买入' : confirmation ? '回踩已确认，等待开盘复核' : '等待回踩确认';
+    decision.append(badge(status, audit.status === 'filled' ? 'buy' : rejectedRow ? 'amber' : 'muted'));
+    const reason = checks.reason || audit.reason || risk.reason;
+    if (reason) decision.append(node('small', 'check-detail', paperLabels[reason] || reason));
+    const times = audit.checked_at || checks.checked_at || audit.observed_at;
+    if (times) decision.append(node('small', 'check-detail', `核验 ${paperTime(times)}`));
+    const structure = node('td', 'paper-price-cell');
+    structure.append(node('span', '', Array.isArray(risk.support_band) && risk.support_band.length === 2 ? `${risk.support_band.map(money).join(' – ')}` : '支撑区未通过核验'));
+    if (numeric(risk.anchor_price)) structure.append(node('small', 'check-detail', `回调锚 ${money(risk.anchor_price)} · ${dateLabel(risk.anchor_date)}`));
+    structure.append(node('small', 'check-detail', `止损 ${money(risk.stop)} / 目标 ${money(risk.target)}`));
+    const details = paperRiskDetails(audit);
+    if (details) structure.append(details);
+    const retest = node('td', 'paper-price-cell');
+    if (confirmation) {
+      retest.append(node('span', '', `${paperTime(confirmation.timestamp)} – ${paperTime(confirmation.end)}`));
+      retest.append(node('small', 'check-detail', `最低 ${money(confirmation.low)} · 收盘 ${money(confirmation.close)}`));
+      if (checks.confirmation_observed_at) retest.append(node('small', 'check-detail', `实际确认 ${paperTime(checks.confirmation_observed_at)}`));
+      retest.append(node('small', 'check-detail', '确认K线内不回填买入'));
+    } else retest.append(node('span', '', rejectedRow ? '本次计划未放行' : '尚无合格完整回踩K线'));
+    const rr = node('td', 'paper-price-cell');
+    rr.append(node('span', '', numeric(checks.net_rr) ? `开盘复核 ${fmt(checks.net_rr)}R` : '开盘复核尚未完成'));
+    rr.append(node('small', 'check-detail', `登记参考 ${numeric(risk.reference_net_rr) ? `${fmt(risk.reference_net_rr)}R` : '不可评估'} · 最低 ${fmt(risk.minimum_net_rr || data.entry_policy?.minimum_net_rr || 3)}R`));
+    rr.append(node('small', 'check-detail', '均按买卖费用与滑点计算'));
+    tr.append(stock, decision, structure, retest, rr, paperPriceCell(audit.entry_price ?? checks.entry_price, audit.entry_timestamp || checks.entry_timestamp, audit.status === 'filled' ? '实际模拟入场' : '尚未模拟成交'));
+    body.append(tr);
+  }
+  $('paper-entry-empty').hidden = rows.length > 0;
+  $('paper-entry-empty').textContent = v2
+    ? '新版本已独立登记，尚无买入前复核记录。后续BUY候选的等待、拒绝和成交依据都会保留；无合格机会时不制造交易。'
+    : '此旧版本没有新规则的买入前审计；原成交与每日盈亏仍可在下方查看。';
+}
+
 function paperStopUpdateDetails(update) {
   const evidence = update.evidence || {};
+  const v2 = update.policy_version === 'structural_retest_v2' || evidence.strategy_version === 'structural_retest_v2';
   const details = node('details', 'paper-risk-details paper-trailing-details');
   details.append(node('summary', '', '查看本次判断依据'));
   const list = node('ul', 'evidence-list');
@@ -644,8 +745,12 @@ function paperStopUpdateDetails(update) {
   if (numeric(evidence.atr)) list.append(node('li', '', `ATR ${fmt(evidence.atr, 4)} · 缓冲 ${fmt(evidence.buffer_atr)}×ATR = ${money(evidence.buffer_value)}`));
   if (numeric(evidence.pivot_low)) list.append(node('li', '', `确认低点 ${money(evidence.pivot_low)} · ${dateLabel(evidence.pivot_date)} · 确认于 ${dateLabel(evidence.pivot_confirmed_at)}${numeric(evidence.previous_pivot_low) ? ` · 前一低点 ${money(evidence.previous_pivot_low)}` : ''}`));
   else list.append(node('li', '', '尚无可用的确认更高低点，结构候选不参与本次上调'));
-  if (numeric(evidence.ma_candidate) || numeric(evidence.structure_candidate)) list.append(node('li', '', `均线候选 ${money(evidence.ma_candidate)} · 结构候选 ${money(evidence.structure_candidate)} · 采用${evidence.selected_basis === 'higher_low' ? '确认的更高低点' : evidence.selected_basis === 'ma20' ? '20日均线区' : '本次记录的依据'}`));
-  list.append(node('li', '', '量化定义：20MA/EMA20区间下沿或左右各3根确认的更高低点，留ATR缓冲后取较高候选；按美分向下取整，只允许上移。'));
+  if (numeric(evidence.ma_candidate) || numeric(evidence.structure_candidate)) list.append(node('li', '', v2
+    ? `共振结构候选 ${money(evidence.structure_candidate)} · 仅在更高低点与均线区共同确认后上调`
+    : `均线候选 ${money(evidence.ma_candidate)} · 结构候选 ${money(evidence.structure_candidate)} · 采用${evidence.selected_basis === 'higher_low' ? '确认的更高低点' : evidence.selected_basis === 'ma20' ? '20日均线区' : '本次记录的依据'}`));
+  list.append(node('li', '', v2
+    ? 'v2量化定义：入场后的确认更高低点与均线区共同形成支撑，按较低结构参考减ATR缓冲，只允许上移；孤立均线上行不会切换原保护依据。'
+    : '旧版本量化定义：20MA/EMA20区间下沿或左右各3根确认的更高低点，留ATR缓冲后取较高候选；按美分向下取整，只允许上移。'));
   if (['applied', 'pending'].includes(update.status) && update.requested_effective_at && update.requested_effective_at !== update.effective_at) list.append(node('li', '', `计划生效 ${paperTime(update.requested_effective_at)}；实际生效见本次记录`));
   if (update.policy_version) list.append(node('li', '', `规则版本 ${update.policy_version}`));
   if (evidence.data_fingerprint) list.append(node('li', '', `行情快照指纹 ${evidence.data_fingerprint}`));
@@ -657,6 +762,7 @@ function paperStopUpdateDetails(update) {
 
 function renderPaperStopAdjustments(data) {
   const policy = data.trailing_policy;
+  const v2 = paperStrategyVersion(data) === 'structural_retest_v2';
   const adjustments = Array.isArray(data.stop_adjustments) ? data.stop_adjustments : [];
   const applied = new Map(adjustments.map((update) => [update.update_id, { ...update, status: 'applied' }]));
   const proposals = (Array.isArray(data.stop_updates) ? data.stop_updates : []).filter((update) => !applied.has(update.update_id));
@@ -668,7 +774,7 @@ function renderPaperStopAdjustments(data) {
     : data.automation_disabled
       ? '该历史账户已停用；这里只展示原样保留的评估与调整记录。'
       : policy
-        ? `移动止损已启用${policy.enabled_at ? ` · ${paperTime(policy.enabled_at)} 北京时间` : ''}。按已完成日线评估20日均线区和确认的更高低点，后续合格交易时段生效；盘中每5分钟检查。只提高、不放宽，初始风险与R基准保持不变。${policy.version || policy.policy_version ? `规则 ${policy.version || policy.policy_version}。` : ''}`
+        ? `${v2 ? '新版本自账户登记起冻结结构跟踪规则，不中途转换旧持仓。' : '旧版本移动止损已启用。'}${policy.enabled_at ? ` ${paperTime(policy.enabled_at)} 北京时间登记。` : ''}${v2 ? ` ${policy.description || '仅按入场后的确认更高低点与均线共振评估上调，沿用初始结构依据。'}` : '按已完成日线评估20日均线区和确认的更高低点。'}后续合格交易时段生效，盘中每5分钟检查；只提高、不放宽，初始风险与R基准保持不变。${policy.version || policy.policy_version ? `规则 ${policy.version || policy.policy_version}。` : ''}`
         : '此账户未启用移动止损，继续按已登记的初始出场价位执行。';
   const body = $('paper-stop-adjustments-body');
   body.replaceChildren();
@@ -699,19 +805,24 @@ function renderPaperStopAdjustments(data) {
 function renderPaperFormPlan() {
   const form = $('paper-form');
   const fixed = form.elements.exit_mode.value === 'fixed_percent';
+  const versioned = !fixed && form.elements.mode.value === 'forward';
+  form.elements.strategy_version.disabled = !versioned;
+  const v2 = versioned && form.elements.strategy_version.value === 'structural_retest_v2';
   const stop = Number(form.elements.stop_loss_percent.value);
   const target = Number(form.elements.take_profit_percent.value);
   $('paper-percent-fields').hidden = !fixed;
   for (const name of ['stop_loss_percent', 'take_profit_percent']) form.elements[name].disabled = !fixed;
-  $('paper-plan-preview').textContent = !fixed
-    ? '逐股读取信号日的关键 K 线与结构价位；成交后计算实际风险距离、目标空间与 R。无有效前高时，仅跟踪结构止损。'
+  $('paper-plan-preview').textContent = v2
+    ? '结构回踩确认 v2：BUY先成为候选，完整K线回踩收复后，下一合格开盘复核成本后RR至少3R；无有效目标不新买。初始止损与后续更高低点跟踪沿用同类结构，独立记账，不转换旧持仓。'
+    : !fixed
+      ? '旧结构口径：读取信号日结构价位，在原规则下验证；无有效前高时仅跟踪结构止损。不会给旧持仓追加v2规则。'
     : stop > 0 && target > 0
       ? `自定义实验：按模拟买入价设置止损 ${fmt(stop)}%、止盈 ${fmt(target)}%，计划约 ${fmt(target / stop)}R，未扣成本。这组比例不是视频的通用规则。`
       : '填写有效的止损距离和止盈目标后，显示计划盈亏比。';
 }
 
 function renderPaperAccounts() {
-  const priority = (account) => account.automation_disabled ? 2 : (paperPlan(account).mode === 'structural' && (account.execution_model || account.config?.execution_model) === 'intraday_5m' ? 0 : 1);
+  const priority = (account) => account.automation_disabled ? 3 : paperStrategyVersion(account) === 'structural_retest_v2' ? 0 : (paperPlan(account).mode === 'structural' && (account.execution_model || account.config?.execution_model) === 'intraday_5m' ? 1 : 2);
   const accounts = [...(workspace.paper_accounts || [])].sort((a, b) => priority(a) - priority(b));
   const selected = selectedPaper?.account_id || $('paper-account-select').value;
   $('paper-account-select').replaceChildren();
@@ -736,12 +847,15 @@ function renderPaper() {
   const positions = Array.isArray(data.positions) ? data.positions : [];
   const trades = Array.isArray(data.trades) ? data.trades : [];
   const plan = paperPlan(data);
+  const v2 = plan.version === 'structural_retest_v2';
   $('paper-account-plan-title').textContent = selectedPaper ? `${plan.label}${data.trailing_policy && !data.automation_disabled ? ' + 移动止损' : ''}` : '等待选择账户';
   $('paper-account-plan-detail').textContent = !selectedPaper
     ? '成交后显示冻结的止损、止盈与实际执行记录。'
     : plan.mode === 'fixed_percent'
       ? `计划盈亏比约 ${fmt(plan.rr)}R，未扣费用与滑点。BUY 登记后等待符合条件的真实行情；以模拟买入价冻结止损与止盈，按后续股价验证出场。`
-      : `每只股票保留初始结构与风险计划${data.trailing_policy ? '；持仓后根据已确认的日线结构与均线上移止损，初始R基准不变' : ''}。无有效前高时跟踪结构止损；下方可查看初始价位与每次调整依据。`;
+      : v2
+        ? '本版本从真实登记时间开始独立运行。买入前确认回踩、有效前高与至少3R成本后盈亏比；初始保护和后续上调都基于同类共振结构，旧两笔亏损保留在旧账户。'
+        : `旧版本保留初始结构与风险计划${data.trailing_policy ? '及已登记的移动止损规则，初始R基准不变' : ''}。无有效前高时跟踪结构止损；不会将新v2规则应用于此账户的已有持仓。`;
   const execution = data.execution_model || data.config?.execution_model;
   const monitor = data.monitor || {};
   const quoteSources = Object.entries(monitor.quote_sources || {});
@@ -768,7 +882,9 @@ function renderPaper() {
   if (selectedPaper && !positions.length && !trades.length) gaps.push('尚无模拟成交记录，当前资金不代表策略验证收益');
   $('paper-data-note').hidden = !gaps.length;
   $('paper-data-note').textContent = gaps.join('。');
+  renderPaperEntryAudits(data);
   renderPaperDailyPnl(data);
+  $('paper-position-rr-heading').textContent = v2 ? '初始成本后计划盈亏比' : '初始计划盈亏比';
   $('paper-position-note').textContent = `${positions.length} 只持仓${data.automation_disabled ? ' · 停用时快照' : ''}`;
   $('paper-positions-body').replaceChildren();
   for (const position of positions) {
@@ -847,7 +963,9 @@ function renderPaper() {
   if (selectedPaper) {
     assumptions.append(node('p', '', `手续费 ${fmt(data.config?.fee_bps)} bps · 滑点 ${fmt(data.config?.slippage_bps)} bps · 账户每笔风险预算 ${numeric(data.config?.risk_fraction) ? `${fmt(data.config.risk_fraction * 100)}%` : '未提供'}`));
     assumptions.append(node('p', '', `出场方案：${plan.label}${numeric(plan.rr) ? ` · 计划盈亏比 ${fmt(plan.rr)}R，未扣费用与滑点` : ''}`));
-    if (plan.mode === 'structural') assumptions.append(node('p', '', data.trailing_policy
+    if (plan.mode === 'structural') assumptions.append(node('p', '', v2
+      ? 'v2入场条件与持仓跟踪在开户时冻结，旧持仓不迁移。实际买入前以已结束K线确认回踩，后续开盘重新核验费用、滑点和至少3R的盈亏比；后续只在入场后确认更高低点与均线同区共振时上移同类保护。3R、确认周期及ATR缓冲为本项目待验证的机械规则。'
+      : data.trailing_policy
       ? '初始结构、仓位与R基准保留原样；持仓后用已完成日线的20MA/EMA20区间及确认的更高低点评估，只上移止损。调整记录区分登记、计划生效、实际生效和核验时间；目标缺失时不补固定百分比。确认周期、ATR缓冲、美分取整和生效规则是项目量化定义。'
       : '逐股识别初始结构价位，保存信号时的依据。此账户按初始止损与目标执行，未启用持仓后的移动止损；目标缺失时不补固定百分比。'));
     if (data.automation_disabled) assumptions.append(node('p', '', `旧示例已停用：${data.legacy_reason || '仅保留原账本，不新增或推进自动交易。'}`));
@@ -1165,6 +1283,7 @@ $('paper-form').addEventListener('submit', async (event) => {
       config.stop_loss_pct = Number(form.elements.stop_loss_percent.value) / 100;
       config.take_profit_pct = Number(form.elements.take_profit_percent.value) / 100;
     }
+    if (config.mode === 'forward' && config.exit_mode === 'structural' && form.elements.strategy_version.value === 'structural_retest_v2') config.strategy_version = 'structural_retest_v2';
     const account = await api('api/paper', {
       method: 'POST', body: JSON.stringify(config),
     });
@@ -1180,6 +1299,7 @@ $('paper-form').addEventListener('submit', async (event) => {
   }
 });
 $('paper-exit-mode').addEventListener('change', renderPaperFormPlan);
+for (const name of ['mode', 'strategy_version']) $('paper-form').elements[name].addEventListener('change', renderPaperFormPlan);
 for (const id of ['paper-pnl-ticker', 'paper-pnl-date']) $(id).addEventListener('change', () => renderPaperDailyPnl(paperLedger(selectedPaper)));
 for (const name of ['stop_loss_percent', 'take_profit_percent']) $('paper-form').elements[name].addEventListener('input', renderPaperFormPlan);
 $('paper-account-select').addEventListener('change', async () => {

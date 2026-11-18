@@ -27,6 +27,7 @@ UTC = timezone.utc
 INTERVAL = timedelta(minutes=5)
 SYMBOL = re.compile(r"^[A-Z][A-Z0-9.\-]{0,11}$")
 CONFIG_KEYS = ("initial_cash", "risk_fraction", "fee_bps", "slippage_bps", "stop_loss_pct", "take_profit_pct")
+STRUCTURE_V2 = "structural_retest_v2"
 
 
 def _stamp(value):
@@ -74,6 +75,10 @@ def _config(value):
         config["exit_mode"] = exit_mode
     elif not 0 < config["stop_loss_pct"] < 1 or not 0 < config["take_profit_pct"] <= 10:
         raise ValueError("invalid intraday account configuration")
+    if value.get("strategy_version") is not None:
+        if exit_mode != "structural" or value["strategy_version"] != STRUCTURE_V2:
+            raise ValueError("unsupported intraday strategy version")
+        config["strategy_version"] = STRUCTURE_V2
     return config
 
 
@@ -131,7 +136,94 @@ def _event(state, kind, moment, recorded_at, **values):
 
 def _skip(state, order, reason, now):
     order["status"], order["reason"] = "skipped", reason
+    if order.get("strategy_version") == STRUCTURE_V2:
+        _entry_check(order, now, status="rejected", reason=reason)
     _event(state, "skipped", now, now, signal_id=order["signal_id"], ticker=order["ticker"], reason=reason)
+
+
+def _entry_check(order, now, **values):
+    plan = order.get("risk_plan")
+    plan = plan if isinstance(plan, dict) else {}
+    confirmation = order.get("entry_confirmation") or {}
+    check = {**order.get("entry_checks", {}), "checked_at": now,
+             "support_band": copy.deepcopy(plan.get("support_band")), "stop": order.get("stop"),
+             "target": order.get("target"), "minimum_net_rr": plan.get("minimum_net_rr"),
+             **({"confirmation_bar": copy.deepcopy(confirmation["price_bar"]),
+                 "confirmation_observed_at": confirmation["observed_at"]} if confirmation else {}), **values}
+    order["entry_checks"] = check
+    return check
+
+
+def _v2_plan_reason(order):
+    plan = order.get("risk_plan")
+    if not isinstance(plan, dict) or plan.get("strategy_version") != STRUCTURE_V2:
+        return "entry_plan_mismatch"
+    if plan.get("eligible") is not True:
+        return plan.get("reason") or "entry_plan_unavailable"
+    if plan.get("stop") != order.get("stop") or plan.get("target") != order.get("target"):
+        return "entry_plan_mismatch"
+    if order.get("target") is None:
+        return "missing_target"
+    try:
+        stop = _finite(plan["stop"], "stop", positive=True)
+        target = _finite(plan["target"], "target", positive=True)
+        lower, upper = [_finite(value, "support band", positive=True) for value in plan["support_band"]]
+        maximum = _finite(plan["maximum_entry_price"], "maximum entry", positive=True)
+        reclaim = _finite(plan["confirmation_close"], "confirmation close", positive=True)
+        ceiling = _finite(plan["retest_ceiling"], "retest ceiling", positive=True)
+        minimum_rr = _finite(plan["minimum_net_rr"], "minimum net RR", positive=True)
+        if not stop < lower <= upper <= maximum or not lower <= reclaim <= ceiling or minimum_rr != 3 or target <= stop:
+            return "entry_plan_mismatch"
+    except (KeyError, TypeError, ValueError):
+        return "entry_plan_mismatch"
+    return None
+
+
+def _v2_retest(state, order, value, now, latest_end):
+    """Return true only for a causally available, rechecked future entry open."""
+    plan = order["risk_plan"]
+    confirmation = order.get("entry_confirmation")
+    if confirmation:
+        previous = _stamp(confirmation["last_bar_end"])
+        if _stamp(value["timestamp"]) != previous or value["session_start"] != confirmation["price_bar"]["session_start"]:
+            _skip(state, order, "retest_coverage_gap", now)
+            return False
+        if _stamp(value["timestamp"]) >= _stamp(confirmation["observed_at"]):
+            return True
+        # This opening predates the actual decision. Its completed prices can
+        # invalidate a still-unfilled setup, but cannot backdate a purchase.
+        confirmation["last_bar_end"] = value["end"]
+        if value["low"] <= order["stop"]:
+            _skip(state, order, "retest_structure_broken", now)
+        else:
+            order["reason"] = "waiting_entry_open"
+        return False
+    previous = order.get("retest_last_bar_end")
+    earliest = max(_stamp(value["session_start"]), _stamp(state["started_at"]), _stamp(order["observed_at"]))
+    expected = (_stamp(previous) if previous else
+                datetime.fromtimestamp(math.ceil(earliest.timestamp() / 300) * 300, UTC))
+    if _stamp(value["timestamp"]) != expected:
+        _entry_check(order, now, expected_bar_start=_iso(expected), available_bar_start=value["timestamp"])
+        _skip(state, order, "retest_coverage_gap", now)
+        return False
+    order["retest_last_bar_end"] = value["end"]
+    if value["low"] <= order["stop"]:
+        _skip(state, order, "retest_structure_broken", now)
+        return False
+    if value["end"] != latest_end or _stamp(now) - _stamp(value["end"]) > timedelta(minutes=10):
+        order["reason"] = "waiting_retest"
+        return False
+    if (value["low"] <= plan["retest_ceiling"] and value["close"] >= plan["confirmation_close"]
+            and value["close"] > value["open"]):
+        order["entry_confirmation"] = {"observed_at": now, "price_bar": copy.deepcopy(value), "last_bar_end": value["end"]}
+        order["reason"] = "retest_confirmed"
+        _entry_check(order, now, status="confirmed", reason="retest_confirmed")
+        _event(state, "entry_confirmation", value["end"], now, ticker=order["ticker"], signal_id=order["signal_id"],
+               reason="retest_confirmed", confirmation=copy.deepcopy(order["entry_confirmation"]))
+    else:
+        order["reason"] = "waiting_retest"
+        _entry_check(order, now, status="waiting", reason="waiting_retest")
+    return False
 
 
 def _initial_risk(position):
@@ -283,6 +375,10 @@ verify upstream that the signal itself used completed daily data.
     today = _day(now_stamp)
     config = _config(config)
     exit_mode = config.get("exit_mode", "fixed_percent")
+    structure_v2 = config.get("strategy_version") == STRUCTURE_V2
+    if structure_v2:
+        from .structure_v2 import ENTRY_POLICY, entry_price_check
+    resuming = state is not None
     if state is None:
         registration = _stamp(started_at) if started_at is not None else now_stamp
         if registration > now_stamp:
@@ -301,6 +397,15 @@ verify upstream that the signal itself used completed daily data.
         if state["last_checked_at"] is not None and _stamp(state["last_checked_at"]) > now_stamp:
             raise ValueError("now cannot move backwards")
         registration = _stamp(state["started_at"])
+    if structure_v2:
+        if not resuming:
+            if trailing_policy is None or trailing_policy.get("version") != STRUCTURE_V2:
+                raise ValueError("v2 policy must be frozen at account creation")
+            state["entry_policy"] = copy.deepcopy(ENTRY_POLICY)
+        elif not state.get("trailing_policy") or state.get("entry_policy") != ENTRY_POLICY:
+            raise ValueError("v2 policy must be frozen at account creation and cannot change")
+        if state.get("trailing_policy", trailing_policy).get("version") != STRUCTURE_V2:
+            raise ValueError("v2 trailing policy does not match strategy version")
     policy = _trailing_policy(state, trailing_policy, now_stamp)
     _register_stop_updates(state, stop_updates, policy, now_stamp)
     state.setdefault("coverage_gaps", {})
@@ -328,9 +433,16 @@ verify upstream that the signal itself used completed daily data.
                          planned_rr=config["take_profit_pct"] / config["stop_loss_pct"])
         else:
             order.update(planned_stop_pct=None, planned_target_pct=None, planned_rr=None)
+        if structure_v2:
+            order["strategy_version"] = STRUCTURE_V2
+            _entry_check(order, now_text, status="waiting", reason="waiting_retest")
         state["orders"].append(order)
         if value["observed_at"] is None:
             _skip(state, order, "missing_observed_at", now_text)
+        elif structure_v2:
+            reason = _v2_plan_reason(order)
+            if reason is not None:
+                _skip(state, order, reason, now_text)
         elif exit_mode == "structural" and (value["stop"] is None or value["stop"] <= 0):
             _skip(state, order, "invalid_stop", now_text)
     reference = normalized.get("SPX", [])
@@ -352,12 +464,15 @@ verify upstream that the signal itself used completed daily data.
         if order["signal_date"] <= session_days[-1] and order["signal_date"] not in session_days:
             _skip(state, order, "missing_signal_session", now_text)
             continue
-        entry = next((day for day in session_days if day > order["signal_date"]), None)
+        entry = (order["entry_session"] if structure_v2 and order.get("entry_session") else
+                 next((day for day in session_days if day > order["signal_date"]), None))
         order["entry_session"] = entry
         if entry is not None and entry < today:
             _skip(state, order, "signal_expired", now_text)
-        else:
+        elif not structure_v2:
             order["reason"] = "waiting_next_bar" if entry else "waiting_next_session"
+        elif not order.get("entry_confirmation"):
+            order["reason"] = "waiting_retest" if entry else "waiting_next_session"
     groups = {}
     for ticker, values in normalized.items():
         for value in values:
@@ -413,6 +528,16 @@ verify upstream that the signal itself used completed daily data.
             if any(p["ticker"] == order["ticker"] for p in state["positions"]):
                 _skip(state, order, "already_holding", now_text)
                 continue
+            if structure_v2:
+                if not _v2_retest(state, order, value, now_text, normalized[order["ticker"]][-1]["end"]):
+                    continue
+                checked = entry_price_check(order["risk_plan"], value["open"],
+                                            fee_bps=config["fee_bps"], slippage_bps=config["slippage_bps"])
+                _entry_check(order, now_text, **checked, status="passed" if checked["eligible"] else "rejected",
+                             entry_timestamp=moment)
+                if not checked["eligible"]:
+                    _skip(state, order, checked["reason"], now_text)
+                    continue
             price = value["open"] * (1 + slip)
             stop = price * (1 - config["stop_loss_pct"]) if exit_mode == "fixed_percent" else order["stop"]
             target = price * (1 + config["take_profit_pct"]) if exit_mode == "fixed_percent" else order["target"]
@@ -425,7 +550,8 @@ verify upstream that the signal itself used completed daily data.
             stop_pct = config["stop_loss_pct"] if exit_mode == "fixed_percent" else (price - stop) / price
             target_pct = config["take_profit_pct"] if exit_mode == "fixed_percent" else (target / price - 1 if target is not None else None)
             planned_rr = target_pct / stop_pct if target_pct is not None else None
-            quantity = min(math.floor(_equity(state) * config["risk_fraction"] / (price - stop)),
+            risk_per_share = checked["net_risk_per_share"] if structure_v2 else price - stop
+            quantity = min(math.floor(_equity(state) * config["risk_fraction"] / risk_per_share),
                            math.floor(state["cash"] / (price * (1 + fees))))
             if quantity <= 0:
                 _skip(state, order, "insufficient_budget", now_text)
@@ -444,6 +570,10 @@ verify upstream that the signal itself used completed daily data.
                 position.update(planned_stop_pct=stop_pct, planned_target_pct=target_pct, risk_plan=order["risk_plan"])
                 if policy is not None:
                     _initial_risk(position)
+            if structure_v2:
+                position.update(strategy_version=STRUCTURE_V2, entry_checks=copy.deepcopy(order["entry_checks"]),
+                                net_rr=order["entry_checks"]["net_rr"],
+                                initial_net_risk_per_share=order["entry_checks"]["net_risk_per_share"])
             state["positions"].append(position)
             order["status"], order["reason"] = "filled", None
             order["entry_timestamp"], order["entry_price"] = moment, price
@@ -453,7 +583,8 @@ verify upstream that the signal itself used completed daily data.
             _event(state, "entry", moment, now_text, ticker=order["ticker"], signal_id=order["signal_id"],
                    quantity=quantity, price=price, fee=entry_fee, price_bar=value,
                    **({"risk_plan": order["risk_plan"], "stop": stop, "target": target, "exit_mode": exit_mode,
-                       "planned_rr": planned_rr} if exit_mode == "structural" else {}))
+                       "planned_rr": planned_rr} if exit_mode == "structural" else {}),
+                   **({"strategy_version": STRUCTURE_V2, "entry_checks": copy.deepcopy(order["entry_checks"])} if structure_v2 else {}))
         for position in list(state["positions"]):
             value = group.get(position["ticker"])
             if value is None or value["volume"] <= 0:
@@ -517,6 +648,7 @@ verify upstream that the signal itself used completed daily data.
             "cash": state["cash"], "equity": equity, "config": config, "coverage_gaps": state["coverage_gaps"],
             **{key: state[key] for key in ("positions", "orders", "trades", "events", "equity_curve")},
             "daily_marks": state.get("daily_marks", []), "metrics": metrics,
+            **({"strategy_version": STRUCTURE_V2, "entry_policy": state["entry_policy"]} if structure_v2 else {}),
             **({key: state[key] for key in ("trailing_policy", "stop_updates", "stop_adjustments")} if policy is not None else {}),
             "assumptions": ["真实完整5分钟K线模拟，不是交易所逐笔成交", "BUY只在下一实际交易日首次登记后的K线开盘模拟入场",
                             "登记前不补买；超过下一交易日的信号作废",

@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from .dashboard import ResearchService, latest_complete_date
+from .dashboard import STRUCTURAL_V2, ResearchService, latest_complete_date
 from .research import ResearchStore, attach_sector_context, build_local_run, build_multica_run, clean, digest, utc_now
 
 
@@ -48,12 +48,17 @@ def daily(data_dir, state_dir, universe_path=None, provider="yahoo"):
     run = store.save_run(run)
     if run["counts"]["ERROR"]:
         raise RuntimeError(f"扫描包含 {run['counts']['ERROR']} 个失败标的，见快照 {run['run_id']}")
-    account = service.paper(run["run_id"], mode="forward", exit_mode="structural")
+    account = service.paper(run["run_id"], mode="forward", exit_mode="structural", strategy_version=STRUCTURAL_V2)
     automatic_id = account["account_id"]
     for account in store.papers():
         if (account["mode"] == "forward" and account["account_id"] != automatic_id and not account.get("automation_disabled")
                 and account.get("provider_id") == run["data_snapshot"]["provider_id"]
                 and account.get("engine_revision") == run.get("engine_revision")):
+            # Legacy automatic structural accounts finish their already saved
+            # orders/positions under their own policy; only v2 enrolls new BUYs.
+            if (account.get("execution_model") == "intraday_5m" and account.get("exit_mode") == "structural"
+                    and not account.get("profile_id") and account.get("strategy_version") != STRUCTURAL_V2):
+                continue
             cfg = {**account["config"], "execution_model": account.get("execution_model", "daily_ohlc")}
             service.paper(run["run_id"], **cfg)
     monitor = service.monitor_paper(reconcile=True)

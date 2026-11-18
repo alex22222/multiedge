@@ -20,9 +20,16 @@ from .research import BASELINE_REVISION, ResearchStore, digest, load_prices, utc
 from .trailing import POLICY, POLICY_VERSION, build_stop_update
 
 
-def _account_trailing_policy(account, observed_at):
-    return (account or {}).get("trailing_policy") or (account or {}).get("state", {}).get("trailing_policy") or {
-        **POLICY, "version": POLICY_VERSION, "enabled_at": observed_at}
+STRUCTURAL_V2 = "structural_retest_v2"
+
+
+def _account_trailing_policy(account, observed_at, strategy_version=None):
+    if account is not None:
+        return account.get("trailing_policy") or account.get("state", {}).get("trailing_policy")
+    if strategy_version == STRUCTURAL_V2:
+        from .structure_v2 import POLICY as policy
+        return {**policy, "version": STRUCTURAL_V2, "enabled_at": observed_at}
+    return {**POLICY, "version": POLICY_VERSION, "enabled_at": observed_at}
 
 def _intraday_config(config):
     result = {k: config[k] for k in ("initial_cash", "risk_fraction", "fee_bps", "slippage_bps")}
@@ -30,6 +37,8 @@ def _intraday_config(config):
         result["exit_mode"] = "structural"
     else:
         result.update({k: config[k] for k in ("stop_loss_pct", "take_profit_pct")})
+    if config.get("strategy_version"):
+        result["strategy_version"] = config["strategy_version"]
     return result
 
 
@@ -98,12 +107,20 @@ class ResearchService:
         marks, sessions, issues = archived_daily_marks(account, self.store.root / "intraday_quotes")
         report = build_daily_pnl(account, archived_marks=marks, sessions=sessions)
         report["notes"] = [*report["notes"], *issues]
-        return {**account, "daily_pnl": report}
+        audits = [{"ticker": order["ticker"], "signal_id": order["signal_id"],
+                   "signal_date": order["signal_date"], "status": order["status"], "reason": order.get("reason"),
+                   "observed_at": order.get("observed_at"), "risk_plan": order.get("risk_plan"),
+                   "entry_checks": order.get("entry_checks", {}),
+                   "entry_confirmation": order.get("entry_confirmation"),
+                   "entry_price": order.get("entry_price"), "entry_timestamp": order.get("entry_timestamp")}
+                  for order in account.get("orders", [])] if account.get("strategy_version") == STRUCTURAL_V2 else []
+        return {**account, "daily_pnl": report, "entry_audits": audits}
 
     def paper_account(self, account_id):
         return self._paper_view(self.store.get_paper(account_id))
 
     def state(self):
+        from .structure_v2 import ENTRY_POLICY, POLICY as structure_policy
         runs = self.store.runs()
         summary_keys = ("run_id", "as_of", "source", "status", "counts", "claimed_counts", "expected_count", "result_count", "coverage", "issue_url", "imported_at")
         validation_file = self.store.root / "validation.json"
@@ -116,8 +133,9 @@ class ResearchService:
                 "validation": validation,
                 "last_job": json.loads(job_file.read_text()) if job_file.exists() else None,
                 "paper_automation": {"execution_model": "intraday_5m", "interval_seconds": 300,
-                                     "exit_mode": "structural", "basis": "逐股采用信号日结构止损与前高目标；百分比由实际成交价计算",
-                                     "trailing_policy": POLICY,
+                                     "exit_mode": "structural", "strategy_version": STRUCTURAL_V2,
+                                     "basis": "BUY先入候选；确认回踩收复、结构止损与成本后至少3R，才允许未来行情成交",
+                                     "entry_policy": ENTRY_POLICY, "trailing_policy": structure_policy,
                                      "monitor": json.loads(monitor_file.read_text()) if monitor_file.exists() else {"status": "not_run"}},
                 "baseline": {"revision": BASELINE_REVISION, "ticker": "GOOGL", "as_of": "2025-08-01", "verdict": "BUY", "trendline": 185.33, "sr_flip": 184.33, "stop": 184.91, "target": 207.05, "rr": 4.25},
                 "methodology": ["七项边缘评分并用硬门槛交集判定", "认知/直觉证据独立记录，技术代理不等于真实催化剂", "历史回放与前向Paper账户独立", "收盘信号下一交易日开盘，迟到导入不回填", "同日止损和目标双触发先止损；费用与滑点独记", "RSI Wilder；MACD EMA adjust=False，MACD高于信号线是状态规则", "未复权日线，不包含分红与拆股总回报", "自定义实验有独立版本，不覆写原始规则"]}
@@ -254,9 +272,26 @@ class ResearchService:
                     if any(position["entry_date"] < event["date"] <= local.date().isoformat() for event in known_splits):
                         bars.pop(position["ticker"], None)
                         errors[position["ticker"]] = "持仓期间发生拆股，暂停处理，等待企业行动会计核验"
+                if config.get("strategy_version") == STRUCTURAL_V2:
+                    for order in account.get("orders", []):
+                        if order["status"] != "pending":
+                            continue
+                        source = quotes["sources"].get(order["ticker"], {})
+                        if any(order["signal_date"] < event["date"] <= local.date().isoformat()
+                               for event in source.get("splits", [])):
+                            bars.pop(order["ticker"], None)
+                            errors[order["ticker"]] = "信号后发生拆股，暂停入场，等待结构价位与企业行动核验"
                 policy, updates, trailing_errors = None, [], {}
                 if config.get("exit_mode", "structural") == "structural":
                     policy = _account_trailing_policy(account, now.isoformat())
+                if policy is not None:
+                    version = policy["version"]
+                    if version == STRUCTURAL_V2:
+                        from .structure_v2 import build_stop_update as stop_builder
+                    elif version == POLICY_VERSION:
+                        stop_builder = build_stop_update
+                    else:
+                        raise ValueError("账户移动止损版本未知，不能自动切换规则")
                     frames, frame_errors = daily_sources.get(account.get("provider_id", "marketwatch"), ({}, {}))
                     reference = frames.get("SPX")
                     source_day = str(reference.index[-1].date()) if reference is not None and not reference.empty else None
@@ -270,7 +305,7 @@ class ResearchService:
                                 raise ValueError(frame_errors.get(ticker) or frame_errors["SPX"])
                             if source_day is None or ticker not in frames:
                                 raise ValueError("尚未取得完整的持仓日线和大盘日线")
-                            if (position["source_signal_id"], source_day, POLICY_VERSION) in known:
+                            if (position["source_signal_id"], source_day, version) in known:
                                 continue
                             used = frames[ticker].loc[:source_day]
                             if not reference.index[-21:].difference(used.index).empty:
@@ -278,8 +313,8 @@ class ResearchService:
                             for snapshot in frames[ticker].attrs.get("snapshots", []):
                                 if snapshot.get("retrieved_at") and datetime.fromisoformat(snapshot["retrieved_at"]) > now:
                                     raise ValueError("日线取得时间晚于本次决定，不能用于更早的移动止损")
-                            update = build_stop_update(position, frames[ticker], source_as_of=source_day,
-                                                       observed_at=now.isoformat(), enabled_at=policy["enabled_at"])
+                            update = stop_builder(position, frames[ticker], source_as_of=source_day,
+                                                  observed_at=now.isoformat(), enabled_at=policy["enabled_at"])
                             if update is not None:
                                 updates.append(update)
                         except (ValueError, KeyError, RuntimeError) as error:
@@ -305,7 +340,7 @@ class ResearchService:
         return receipt
 
     def paper(self, run_id, mode="replay", initial_cash=100000, risk_fraction=.0035, fee_bps=5, slippage_bps=5, profile_id=None,
-              exit_mode="structural", stop_loss_pct=None, take_profit_pct=None, execution_model=None):
+              exit_mode="structural", stop_loss_pct=None, take_profit_pct=None, execution_model=None, strategy_version=None):
         run = self.store.get_run(run_id)
         if mode == "forward" and run["as_of"] > latest_complete_date():
             raise ValueError("信号日期晚于最近完整交易日")
@@ -323,6 +358,13 @@ class ResearchService:
         execution_model = execution_model or ("intraday_5m" if mode == "forward" else "daily_ohlc")
         if execution_model not in ("intraday_5m", "daily_ohlc") or (execution_model == "intraday_5m" and mode != "forward"):
             raise ValueError("盘中模型仅支持前向Paper")
+        if strategy_version not in (None, "", STRUCTURAL_V2):
+            raise ValueError("未知Paper策略版本")
+        strategy_version = strategy_version or None
+        if strategy_version:
+            if mode != "forward" or exit_mode != "structural" or execution_model != "intraday_5m":
+                raise ValueError("v2版本仅支持独立的前向结构盘中Paper")
+            config["strategy_version"] = strategy_version
         if execution_model == "intraday_5m":
             config["execution_model"] = execution_model
             if exit_mode == "structural":
@@ -365,6 +407,8 @@ class ResearchService:
                     continue
                 signal_id = (f"{scope['provider_id']}:{run.get('engine_revision') or 'imported'}:{profile_id or 'baseline'}:{run['as_of']}:{row['ticker']}"
                              if mode == "forward" else f"{run_id}:{profile_id or 'baseline'}:{row['ticker']}")
+                if strategy_version:
+                    signal_id += f":{strategy_version}"
                 observed_at = observations.get(signal_id, first_seen) if mode == "forward" else run["imported_at"]
                 signals.append({"ticker": row["ticker"], "signal_date": run["as_of"], "stop": row["report"].get("stop"),
                                 "target": row["report"].get("target"), "signal_id": signal_id, "observed_at": observed_at})
@@ -374,13 +418,42 @@ class ResearchService:
                     signal["source_run_id"] = run_id
                     if exit_mode == "structural":
                         report = next(r["report"] for r in run["results"] if r["ticker"] == signal["ticker"])
-                        signal["risk_plan"] = _structural_plan(run, report)
                         saved = saved_orders.get(signal["signal_id"])
                         if saved:
                             signal.update({k: saved[k] for k in ("stop", "target", "risk_plan", "source_run_id")})
+                        elif strategy_version == STRUCTURAL_V2:
+                            from .structure_v2 import build_entry_plan
+                            try:
+                                frame = load_prices(signal["ticker"], run["as_of"], self._data_dir(run))
+                                source_row = next(row for row in run["results"] if row["ticker"] == signal["ticker"])
+                                expected_hash = source_row.get("source_hash") or run.get("data_snapshot", {}).get("hashes", {}).get(signal["ticker"])
+                                actual_hash = hashlib.sha256(frame.to_csv().encode()).hexdigest()
+                                if not expected_hash or actual_hash != expected_hash:
+                                    raise ValueError("日线缓存与冻结信号快照哈希不一致，不能混用结构与行情")
+                                metadata = frame.attrs
+                                snapshots = list(metadata.get("snapshots") or [])
+                                if metadata.get("retrieved_at"):
+                                    snapshots.append({key: metadata[key] for key in ("raw_sha256", "csv_sha256", "retrieved_at", "request_start", "request_end") if key in metadata})
+                                for snapshot in snapshots:
+                                    if snapshot.get("retrieved_at") and datetime.fromisoformat(snapshot["retrieved_at"].replace("Z", "+00:00")) > datetime.fromisoformat(signal["observed_at"].replace("Z", "+00:00")):
+                                        raise ValueError("日线取得时间晚于计划观察时间，不能用于过去的入场决定")
+                                frame.attrs = {**metadata, "snapshots": snapshots}
+                                planned = build_entry_plan(report, frame, source_as_of=run["as_of"],
+                                                           observed_at=signal["observed_at"], source_run_id=run_id,
+                                                           fee_bps=fee_bps, slippage_bps=slippage_bps)
+                                planned["risk_plan"]["source_price_hash"] = actual_hash
+                                signal.update({key: planned[key] for key in ("stop", "target", "risk_plan")})
+                            except (ValueError, OSError, KeyError, RuntimeError) as error:
+                                signal["risk_plan"] = {"strategy_version": STRUCTURAL_V2, "eligible": False,
+                                                       "reason": "invalid_daily_plan", "data_error": str(error),
+                                                       "source_run_id": run_id, "source_as_of": run["as_of"],
+                                                       "observed_at": signal["observed_at"], "stop": signal["stop"],
+                                                       "target": signal["target"]}
+                        else:
+                            signal["risk_plan"] = _structural_plan(run, report)
                 ledger_config = _intraday_config(config)
                 observed = utc_now()
-                policy = _account_trailing_policy(old, observed) if exit_mode == "structural" else None
+                policy = _account_trailing_policy(old, observed, strategy_version) if exit_mode == "structural" else None
                 result = apply_intraday(signals, {}, now=datetime.fromisoformat(observed.replace("Z", "+00:00")), config=ledger_config,
                                         state=old["state"] if old else None, started_at=first_seen if old is None else None,
                                         trailing_policy=policy)
