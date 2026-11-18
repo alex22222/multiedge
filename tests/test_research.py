@@ -101,6 +101,7 @@ def test_new_evidence_preserves_previous_sources(tmp_path):
 def test_new_empty_forward_account_has_no_pre_registration_equity_history(tmp_path, monkeypatch):
     service = ResearchService(DATA, tmp_path)
     run = build_local_run(["GOOGL"], "2025-06-30", DATA)
+    run["imported_at"] = "2025-06-30T22:00:00+00:00"
     service.store.save_run(run)
     monkeypatch.setattr("multiedge.dashboard.utc_now", lambda: "2026-11-18T01:00:00+00:00")
     result = service.paper(run["run_id"], mode="forward")

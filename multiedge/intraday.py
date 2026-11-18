@@ -132,6 +132,121 @@ def _skip(state, order, reason, now):
     _event(state, "skipped", now, now, signal_id=order["signal_id"], ticker=order["ticker"], reason=reason)
 
 
+def _initial_risk(position):
+    position.setdefault("initial_stop", position["stop"])
+    position.setdefault("initial_risk_per_share", position["entry_price"] - position["initial_stop"])
+    position.setdefault("stop_adjustments", [])
+
+
+def _trailing_policy(state, value, now):
+    if value is None:
+        return state.get("trailing_policy")
+    if state["config"].get("exit_mode") != "structural":
+        raise ValueError("trailing policy requires structural exits")
+    policy = copy.deepcopy(value)
+    if not isinstance(policy, dict) or not isinstance(policy.get("version"), str) or not policy["version"]:
+        raise ValueError("trailing policy must identify its version")
+    policy["enabled_at"] = _iso(_stamp(policy["enabled_at"]))
+    if _stamp(policy["enabled_at"]) > now:
+        raise ValueError("trailing policy cannot be enabled in the future")
+    if state.get("trailing_policy") is not None:
+        if state["trailing_policy"] != policy:
+            raise ValueError("trailing policy cannot change on resume")
+        return policy
+    if state.get("last_checked_at") and _stamp(policy["enabled_at"]) < _stamp(state["last_checked_at"]):
+        raise ValueError("trailing policy cannot backdate its activation")
+    state.update(trailing_policy=policy, stop_updates=[], stop_adjustments=[], processed_stop_updates={})
+    for position in state["positions"]:
+        _initial_risk(position)
+    _event(state, "trailing_enabled", policy["enabled_at"], _iso(now), policy_version=policy["version"], policy=policy)
+    return policy
+
+
+def _stop_update(value, policy, now):
+    identity = value.get("update_id")
+    signal_id = value.get("source_signal_id")
+    if not isinstance(identity, str) or not identity or not isinstance(signal_id, str) or not signal_id:
+        raise ValueError("stop update requires update_id and source_signal_id")
+    if value.get("policy_version") != policy["version"]:
+        raise ValueError("stop update policy version does not match")
+    day = date.fromisoformat(value["source_as_of"]).isoformat()
+    completed, observed, effective = (_stamp(value[key]) for key in ("source_completed_at", "observed_at", "effective_at"))
+    if _day(completed) != day or not completed <= observed <= effective or observed > now:
+        raise ValueError("stop update evidence is future or inconsistent")
+    reason, evidence = value.get("reason"), value.get("evidence")
+    if not isinstance(reason, str) or not reason or not isinstance(evidence, dict):
+        raise ValueError("stop update requires a reason and evidence")
+    return {"update_id": identity, "ticker": _symbol(value["ticker"]), "source_signal_id": signal_id,
+            "new_stop": _finite(value["new_stop"], "new stop", positive=True), "source_as_of": day,
+            "source_completed_at": _iso(completed), "observed_at": _iso(observed), "effective_at": _iso(effective),
+            "policy_version": policy["version"], "reason": reason, "evidence": copy.deepcopy(evidence)}
+
+
+def _register_stop_updates(state, values, policy, now):
+    if values and policy is None:
+        raise ValueError("stop updates require an enabled trailing policy")
+    for value in values or []:
+        update = _stop_update(value, policy, now)
+        identity, fingerprint = update["update_id"], _hash(update)
+        if identity in state["processed_stop_updates"]:
+            if state["processed_stop_updates"][identity] != fingerprint:
+                raise ValueError("update_id already exists with different content")
+            continue
+        position = next((p for p in state["positions"] if p["ticker"] == update["ticker"]
+                         and p["source_signal_id"] == update["source_signal_id"]), None)
+        if position is not None and update["source_as_of"] < position["entry_date"]:
+            raise ValueError("stop update source predates the position entry")
+        state["processed_stop_updates"][identity] = fingerprint
+        state["stop_updates"].append({**update, "status": "pending" if position is not None else "position_closed",
+                                      "registered_at": _iso(now),
+                                      **({"status_reason": "position_closed_before_activation", "evaluated_at": _iso(now)} if position is None else {})})
+
+
+def _closed_stop_updates(state, now):
+    held = {(p["ticker"], p["source_signal_id"]) for p in state["positions"]}
+    for update in state.get("stop_updates", []):
+        if update["status"] == "pending" and (update["ticker"], update["source_signal_id"]) not in held:
+            update.update(status="position_closed", status_reason="position_closed_before_activation", evaluated_at=now)
+
+
+def _apply_stop_updates(state, group, moment, now, fees, slip):
+    policy = state.get("trailing_policy")
+    if policy is None:
+        return
+    _closed_stop_updates(state, now)
+    for update in sorted(state["stop_updates"], key=lambda u: (u["effective_at"], u["observed_at"], u["update_id"])):
+        if update["status"] != "pending":
+            continue
+        value = group.get(update["ticker"])
+        if (value is None or value["volume"] <= 0
+                or _stamp(moment) < max(_stamp(update["effective_at"]), _stamp(update["observed_at"]), _stamp(policy["enabled_at"]))
+                or _day(_stamp(moment)) <= update["source_as_of"]):
+            continue
+        position = next((p for p in state["positions"] if p["ticker"] == update["ticker"]
+                         and p["source_signal_id"] == update["source_signal_id"]), None)
+        if position is None:
+            update.update(status="position_closed", status_reason="position_closed_before_activation", evaluated_at=now)
+            continue
+        if update["new_stop"] <= position["stop"]:
+            update.update(status="no_change", status_reason="not_higher", old_stop=position["stop"], evaluated_at=now, evaluated_effective_at=moment)
+            continue
+        _initial_risk(position)
+        adjustment = {k: copy.deepcopy(v) for k, v in update.items() if k not in ("status", "registered_at")}
+        adjustment.update(old_stop=position["stop"], requested_effective_at=update["effective_at"], effective_at=moment,
+                          applied_at=now, recorded_at=now)
+        position["stop"] = update["new_stop"]
+        position["current_stop_update_id"] = update["update_id"]
+        position["stop_adjustments"].append(copy.deepcopy(adjustment))
+        state["stop_adjustments"].append(adjustment)
+        update.update(status="applied", old_stop=adjustment["old_stop"], applied_at=now, applied_effective_at=moment)
+        _event(state, "stop_adjustment", moment, now, ticker=position["ticker"], signal_id=position["source_signal_id"],
+               update_id=update["update_id"], old_stop=adjustment["old_stop"], new_stop=adjustment["new_stop"],
+               reason=update["reason"], adjustment=copy.deepcopy(adjustment))
+        if value["open"] <= position["stop"]:
+            _close(state, position, value["open"], value, "trailing_stop_gap", now, fees, slip)
+    _closed_stop_updates(state, now)
+
+
 def _close(state, position, raw_price, bar, reason, now, fees, slip):
     price = raw_price * (1 - slip)
     proceeds = position["quantity"] * price
@@ -140,7 +255,7 @@ def _close(state, position, raw_price, bar, reason, now, fees, slip):
     state["fees_paid"] += exit_fee
     moment = bar["timestamp"] if reason.endswith("_gap") else bar["end"]
     net = proceeds - position["quantity"] * position["entry_price"] - position["entry_fee"] - exit_fee
-    risk = position["quantity"] * (position["entry_price"] - position["stop"])
+    risk = position["quantity"] * position.get("initial_risk_per_share", position["entry_price"] - position["stop"])
     trade = {**position, "exit_date": _day(_stamp(moment)), "exit_timestamp": moment,
              "exit_price": price, "exit_fee": exit_fee, "exit_reason": reason,
              "net_pnl": net, "pnl_pct": net / (position["quantity"] * position["entry_price"] + position["entry_fee"]),
@@ -152,7 +267,7 @@ def _close(state, position, raw_price, bar, reason, now, fees, slip):
            **({"risk_plan": position["risk_plan"]} if position.get("exit_mode") == "structural" else {}))
 
 
-def apply_intraday(signals, bars, *, now, config, state=None, started_at=None):
+def apply_intraday(signals, bars, *, now, config, state=None, started_at=None, stop_updates=None, trailing_policy=None):
     """Queue BUYs and apply complete 5-minute bars to a separate Paper account.
 
 SPX bars determine actual next-session dates. Without fresh SPX bars no new
@@ -184,6 +299,8 @@ verify upstream that the signal itself used completed daily data.
         if state["last_checked_at"] is not None and _stamp(state["last_checked_at"]) > now_stamp:
             raise ValueError("now cannot move backwards")
         registration = _stamp(state["started_at"])
+    policy = _trailing_policy(state, trailing_policy, now_stamp)
+    _register_stop_updates(state, stop_updates, policy, now_stamp)
     state.setdefault("coverage_gaps", {})
     entry_watermark = _stamp(state["last_data_at"]) if state.get("last_data_at") else registration
     normalized = {}
@@ -280,9 +397,10 @@ verify upstream that the signal itself used completed daily data.
                 continue
             position["mark"] = value["open"]
             if value["open"] <= position["stop"]:
-                _close(state, position, value["open"], value, "stop_gap", now_text, fees, slip)
+                _close(state, position, value["open"], value, "trailing_stop_gap" if position.get("current_stop_update_id") else "stop_gap", now_text, fees, slip)
             elif position["target"] is not None and value["open"] >= position["target"]:
                 _close(state, position, value["open"], value, "target_gap", now_text, fees, slip)
+        _apply_stop_updates(state, group, moment, now_text, fees, slip)
         for order in sorted(state["orders"], key=lambda o: (o["signal_date"], o["ticker"], o["signal_id"])):
             value = group.get(order["ticker"])
             if (order["status"] != "pending" or not reference_fresh or value is None
@@ -322,6 +440,8 @@ verify upstream that the signal itself used completed daily data.
                         "mark_session_end": value["session_end"], "source_run_id": order.get("source_run_id")}
             if exit_mode == "structural":
                 position.update(planned_stop_pct=stop_pct, planned_target_pct=target_pct, risk_plan=order["risk_plan"])
+                if policy is not None:
+                    _initial_risk(position)
             state["positions"].append(position)
             order["status"], order["reason"] = "filled", None
             order["entry_timestamp"], order["entry_price"] = moment, price
@@ -339,7 +459,10 @@ verify upstream that the signal itself used completed daily data.
             stop_hit = value["low"] <= position["stop"]
             target_hit = position["target"] is not None and value["high"] >= position["target"]
             if stop_hit:
-                _close(state, position, position["stop"], value, "stop_and_target" if target_hit else "stop", now_text, fees, slip)
+                reason = "stop_and_target" if target_hit else "stop"
+                if position.get("current_stop_update_id"):
+                    reason = "trailing_" + reason
+                _close(state, position, position["stop"], value, reason, now_text, fees, slip)
             elif target_hit:
                 _close(state, position, position["target"], value, "target", now_text, fees, slip)
             else:
@@ -359,6 +482,7 @@ verify upstream that the signal itself used completed daily data.
             state["equity_curve"][-1] = point
         else:
             state["equity_curve"].append(point)
+    _closed_stop_updates(state, now_text)
     state["last_checked_at"] = now_text
     equity = _equity(state)
     latest = state.get("last_data_at")
@@ -387,9 +511,11 @@ verify upstream that the signal itself used completed daily data.
             "wallclock_age_seconds": (now_stamp - _stamp(latest)).total_seconds() if latest else None,
             "cash": state["cash"], "equity": equity, "config": config, "coverage_gaps": state["coverage_gaps"],
             **{key: state[key] for key in ("positions", "orders", "trades", "events", "equity_curve")}, "metrics": metrics,
+            **({key: state[key] for key in ("trailing_policy", "stop_updates", "stop_adjustments")} if policy is not None else {}),
             "assumptions": ["真实完整5分钟K线模拟，不是交易所逐笔成交", "BUY只在下一实际交易日首次登记后的K线开盘模拟入场",
                             "登记前不补买；超过下一交易日的信号作废",
-                            "止损/目标取自信号日结构快照，成交后按实际价差计算仓位与RR；不自动放宽止损" if exit_mode == "structural" else "止损/目标按实际模拟入场价冻结",
+                            ("初始止损/目标来自信号日结构快照；移动止损只按已登记的完整日线决策上移，R仍以初始风险计算" if policy is not None
+                             else "止损/目标取自信号日结构快照，成交后按实际价差计算仓位与RR；不自动放宽止损") if exit_mode == "structural" else "止损/目标按实际模拟入场价冻结",
                             "跳空按开盘，单根K线双触发先止损", "触发时刻仅精确到5分钟K线，保留核验批次截止时间与行情接收证据",
                             "持仓缺失中间K线暂停该标的，补齐后核对；不以之后的价格推测缺失区间",
                             "价差风险预算不包含跳空与费用；不含分红/拆股会计"]}

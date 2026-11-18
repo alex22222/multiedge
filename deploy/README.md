@@ -54,7 +54,7 @@ The corrected default registers every baseline BUY in a structural-exit account,
 
 Fixed percentages remain optional, explicitly chosen experiments. The two previously automatic 3%/25% and 5%/25% example accounts must retain their original orders, fills and levels, with `automation_disabled=True` making them read-only and excluded from both daily enrollment and price-check advancement. A new structural account starts at actual registration; do not rewrite old trades or backfill new ones. Existing structural daily/replay accounts remain independent.
 
-The `5751f20`/195-test deployment receipt describes the earlier fixed-example release. The structural-default correction needs its own test, migration, browser and server acceptance receipts; do not treat the earlier result as proof that this correction is deployed.
+The `5751f20`/195-test receipt describes the earlier fixed-example release, while `9950072`/216 tests records the subsequent structural-default correction. Preserve those as historical evidence. The new trailing-stop feature requires its own deployment, actual activation, browser and runtime receipts; earlier results do not prove that this feature is live.
 
 ## Five-minute Paper schedule
 
@@ -69,7 +69,24 @@ sudo systemctl list-timers multiedge-paper-monitor.timer
 
 `--enable-monitor` can activate it during later verified deployments. It runs every five minutes from 09:30 through 16:05 New York time on weekdays. `Persistent=false` avoids interpreting missed timer ticks as past executions; each successful check reconciles available completed bars after actual registration. Actual sessions, holidays, early closes and source freshness are checked against provider session metadata. Missing, stale or discontinuous quotes pause affected processing and appear in `last-paper-monitor.json` and account records. Normalized bars and source hashes are retained under `/var/lib/multiedge/intraday_quotes`; source exchange delay may be unknown. This is OHLC-based Paper simulation, with no brokerage connection.
 
-Five-minute checks execute the saved initial structural risk plan; they do not introduce an automatic trailing-stop or downward stop-reset rule. Continue the existing 18:30 New York daily close reconciliation. After deploying the correction, verify the new structural account, missing-target handling, and the disabled status of the two historical example accounts before recording acceptance.
+Five-minute checks continue to execute saved protection. The new default for active structural 5-minute accounts also evaluates the `structure_ma20_hl_v1` trailing policy from completed daily data; it never lowers a stop. Continue the existing 18:30 New York daily close reconciliation and the disabled status of the two historical example accounts.
+
+## Trailing-stop activation and audit
+
+The source principles are the video's 20MA-with-buffer exit guidance and stronger-price structures (F2b, F4, G1/G2). The following are explicit project assumptions, not a verbatim video algorithm:
+
+- Treat source session D as complete only after **16:30 America/New_York**, and truncate indicator/pivot inputs to D. Compute the lower edge of 20SMA/20EMA minus 0.1×ATR(14). A rising band with the close still supporting it is eligible; a close already below the buffered protection can also register a future exit level.
+- A structural candidate uses a confirmed higher pivot low whose date is strictly after entry, with three complete right-hand sessions confirming it. Subtract the same ATR buffer. Floor candidates to cents; choose the higher eligible MA or structure candidate and require an increase of at least $0.01. This tighter OR protection may exit earlier than waiting for confluence; it never widens the stop.
+- Register each proposal with its actual observation and policy activation times. Apply it only in a later session than the source day and on a qualified bar beginning no earlier than registration/activation. Normally that is the next actual session open; late registration waits for a subsequent eligible bar. If that open is below the new protection, exit at the actual open with configured slippage, not at a fictional historical close or stop price.
+- Retain `initial_stop` and `initial_risk_per_share`. Planned RR and realized R continue to use original price-distance risk; net PnL includes fees. The original target remains unchanged, including an unavailable target.
+
+New active structural 5-minute accounts receive the versioned policy. Existing open structural holdings activate at the actual upgrade/check time, with an appended policy event; do not backdate activation, rewrite purchases, or recalculate closed trades. Fixed-percentage, disabled, daily and replay accounts keep their existing behavior. Holdings are managed even after they cease to be BUY signals.
+
+Daily prices are obtained from the account's verified provider/cache independently of the scanner's current BUY list. Failed freshness, hash, market-calendar or corporate-action checks pause only new trailing calculations and are reported in `monitor.trailing_errors`; valid existing protective orders continue to run on valid 5-minute data. Missing/discontinuous intraday bars still invoke the separate execution-coverage protections.
+
+Inspect `trailing_policy`, `stop_updates` and `stop_adjustments` in the Paper account. `pending` is a proposal, not an applied change; `applied`, `no_change` and `position_closed` distinguish outcomes. An applied record must retain old/new prices, source day and completion time, actual observation, requested and actual effective times, processing time, indicator/confirmed-pivot evidence, source fingerprints and policy version. The dashboard shows initial/current stops and the full adjustment audit; zero adjustments must remain explicit when no raise has become effective.
+
+Before recording acceptance, back up persistent state, verify actual activation of existing open structural holdings, preservation of original risk/history and the disabled examples, then check one real monitor run, both timers, the source/proposal/application distinctions and browser evidence. The current implementation and local regression results are not a substitute for those pending server receipts.
 
 ## Inspect and roll back
 

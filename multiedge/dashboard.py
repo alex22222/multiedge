@@ -17,6 +17,12 @@ from .experiments import ExperimentConfig, evaluate_experiment
 from .paper import run_paper
 from .report import render_snapshot
 from .research import BASELINE_REVISION, ResearchStore, digest, load_prices, utc_now, validate_ticker
+from .trailing import POLICY, POLICY_VERSION, build_stop_update
+
+
+def _account_trailing_policy(account, observed_at):
+    return (account or {}).get("trailing_policy") or (account or {}).get("state", {}).get("trailing_policy") or {
+        **POLICY, "version": POLICY_VERSION, "enabled_at": observed_at}
 
 def _intraday_config(config):
     result = {k: config[k] for k in ("initial_cash", "risk_fraction", "fee_bps", "slippage_bps")}
@@ -100,6 +106,7 @@ class ResearchService:
                 "last_job": json.loads(job_file.read_text()) if job_file.exists() else None,
                 "paper_automation": {"execution_model": "intraday_5m", "interval_seconds": 300,
                                      "exit_mode": "structural", "basis": "逐股采用信号日结构止损与前高目标；百分比由实际成交价计算",
+                                     "trailing_policy": POLICY,
                                      "monitor": json.loads(monitor_file.read_text()) if monitor_file.exists() else {"status": "not_run"}},
                 "baseline": {"revision": BASELINE_REVISION, "ticker": "GOOGL", "as_of": "2025-08-01", "verdict": "BUY", "trendline": 185.33, "sr_flip": 184.33, "stop": 184.91, "target": 207.05, "rr": 4.25},
                 "methodology": ["七项边缘评分并用硬门槛交集判定", "认知/直觉证据独立记录，技术代理不等于真实催化剂", "历史回放与前向Paper账户独立", "收盘信号下一交易日开盘，迟到导入不回填", "同日止损和目标双触发先止损；费用与滑点独记", "RSI Wilder；MACD EMA adjust=False，MACD高于信号线是状态规则", "未复权日线，不包含分红与拆股总回报", "自定义实验有独立版本，不覆写原始规则"]}
@@ -138,9 +145,36 @@ class ResearchService:
     def _data_dir(self, run):
         return self.data_dir / "yahoo" if run.get("data_snapshot", {}).get("provider_id") == "yahoo" else self.data_dir
 
+    def _trailing_frames(self, tickers, provider, now):
+        """完整日线用于持仓管理；独立于当日是否仍为BUY。"""
+        cutoff = latest_complete_date(now)
+        frames, errors = {}, {}
+        for ticker in ["SPX", *sorted(set(tickers) - {"SPX"})]:
+            try:
+                if provider == "yahoo":
+                    from .market import fetch_yahoo_daily
+                    frame = fetch_yahoo_daily(ticker, "2023-06-01", cutoff, self.data_dir / "yahoo")
+                    meta = frame.attrs
+                    frame.attrs = {**meta, "splits": meta.get("events", {}).get("splits", []),
+                                   "snapshots": [{k: meta[k] for k in ("raw_sha256", "csv_sha256", "request_start", "request_end", "retrieved_at")}]}
+                else:
+                    frame = load_prices(ticker, cutoff, self.data_dir, allow_download=True)
+                frame = frame.loc[:cutoff].copy()
+                if frame.empty or (datetime.fromisoformat(cutoff).date() - frame.index[-1].date()).days > 4:
+                    raise ValueError("完整日线缺失或陈旧超过4日")
+                if ticker != "SPX" and ("SPX" not in frames or frame.index[-1] != frames["SPX"].index[-1]):
+                    raise ValueError("持仓日线与大盘截止日不一致")
+                if ticker != "SPX" and not frames["SPX"].index[-21:].difference(frame.index).empty:
+                    raise ValueError("持仓日线缺少最近21个大盘交易日中的行情")
+                frames[ticker] = frame
+            except (ValueError, OSError, KeyError, RuntimeError) as error:
+                errors[ticker] = str(error)
+        return frames, errors
+
     def monitor_paper(self, now=None, reconcile=False):
         """只检查已登记的Paper订单/持仓；网络抓取在账本锁外进行。"""
         from .intraday import apply_intraday, fetch_yahoo_intraday
+        wall_clock = now is None
         now = now or datetime.now(timezone.utc)
         if now.tzinfo is None:
             raise ValueError("盘中检查时间必须带时区")
@@ -156,6 +190,29 @@ class ResearchService:
         tickers = {p["ticker"] for a in accounts for p in a.get("positions", [])}
         tickers |= {o["ticker"] for a in accounts for o in a.get("orders", []) if o["status"] == "pending"}
         quotes = fetch_yahoo_intraday(sorted(tickers), now=now, cache_dir=self.store.root / "intraday_quotes")
+        daily_sources = {}
+        for provider in {a.get("provider_id", "marketwatch") for a in accounts if a.get("exit_mode") == "structural" and a.get("positions")}:
+            held = {p["ticker"] for a in accounts if a.get("provider_id", "marketwatch") == provider
+                    and a.get("exit_mode") == "structural" for p in a.get("positions", [])}
+            try:
+                daily_sources[provider] = self._trailing_frames(held, provider, now)
+            except (ValueError, OSError, KeyError, RuntimeError) as error:
+                daily_sources[provider] = ({}, {ticker: str(error) for ticker in held})
+        if wall_clock:
+            now = datetime.now(timezone.utc)
+            receipt["last_checked_at"] = now.isoformat()
+            local = now.astimezone(ZoneInfo("America/New_York"))
+        if daily_sources:
+            cutoff = latest_complete_date(now)
+            completed_sessions = [datetime.fromisoformat(b["session_start"]).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+                                  for b in quotes["bars"].get("SPX", [])
+                                  if datetime.fromisoformat(b["session_end"]) <= now
+                                  and datetime.fromisoformat(b["session_start"]).astimezone(ZoneInfo("America/New_York")).date().isoformat() <= cutoff]
+            expected_day = max(completed_sessions) if completed_sessions else None
+            for frames, frame_errors in daily_sources.values():
+                reference = frames.get("SPX")
+                if expected_day and reference is not None and str(reference.index[-1].date()) != expected_day:
+                    frame_errors["SPX"] = f"完整日线未覆盖已核验的最新交易日 {expected_day}"
         receipt["errors"] = quotes["errors"]
         with (self.store.root / "paper.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -179,17 +236,53 @@ class ResearchService:
                         errors.setdefault(ticker, "尚未取得新鲜、完整的5分钟行情")
                 for position in account.get("positions", []):
                     source = quotes["sources"].get(position["ticker"], {})
-                    if any(position["entry_date"] < event["date"] <= local.date().isoformat() for event in source.get("splits", [])):
+                    daily = daily_sources.get(account.get("provider_id", "marketwatch"), ({}, {}))[0].get(position["ticker"])
+                    daily_splits = (daily.attrs.get("splits", daily.attrs.get("events", {}).get("splits", [])) if daily is not None else [])
+                    known_splits = [event for event in [*(source.get("splits") or []), *(daily_splits if isinstance(daily_splits, list) else [])]
+                                    if isinstance(event, dict) and isinstance(event.get("date"), str)]
+                    if any(position["entry_date"] < event["date"] <= local.date().isoformat() for event in known_splits):
                         bars.pop(position["ticker"], None)
                         errors[position["ticker"]] = "持仓期间发生拆股，暂停处理，等待企业行动会计核验"
-                result = apply_intraday([], bars, now=now, config=ledger_config, state=account["state"])
+                policy, updates, trailing_errors = None, [], {}
+                if config.get("exit_mode", "structural") == "structural":
+                    policy = _account_trailing_policy(account, now.isoformat())
+                    frames, frame_errors = daily_sources.get(account.get("provider_id", "marketwatch"), ({}, {}))
+                    reference = frames.get("SPX")
+                    source_day = str(reference.index[-1].date()) if reference is not None and not reference.empty else None
+                    known = {(u["source_signal_id"], u["source_as_of"], u["policy_version"]) for u in account.get("stop_updates", [])}
+                    for position in account.get("positions", []):
+                        ticker = position["ticker"]
+                        if ticker in errors or "SPX" in errors:
+                            continue
+                        try:
+                            if ticker in frame_errors or "SPX" in frame_errors:
+                                raise ValueError(frame_errors.get(ticker) or frame_errors["SPX"])
+                            if source_day is None or ticker not in frames:
+                                raise ValueError("尚未取得完整的持仓日线和大盘日线")
+                            if (position["source_signal_id"], source_day, POLICY_VERSION) in known:
+                                continue
+                            used = frames[ticker].loc[:source_day]
+                            if not reference.index[-21:].difference(used.index).empty:
+                                raise ValueError("持仓日线缺少最近21个大盘交易日中的行情，暂停计算")
+                            for snapshot in frames[ticker].attrs.get("snapshots", []):
+                                if snapshot.get("retrieved_at") and datetime.fromisoformat(snapshot["retrieved_at"]) > now:
+                                    raise ValueError("日线取得时间晚于本次决定，不能用于更早的移动止损")
+                            update = build_stop_update(position, frames[ticker], source_as_of=source_day,
+                                                       observed_at=now.isoformat(), enabled_at=policy["enabled_at"])
+                            if update is not None:
+                                updates.append(update)
+                        except (ValueError, KeyError, RuntimeError) as error:
+                            trailing_errors[ticker] = str(error)
+                result = apply_intraday([], bars, now=now, config=ledger_config, state=account["state"],
+                                        trailing_policy=policy, stop_updates=updates)
                 for ticker, gap in result.get("coverage_gaps", {}).items():
                     errors[ticker] = f"盘中行情覆盖中断：需要 {gap['expected_from']} 起的连续行情，暂停处理"
                 account.update(result)
                 account["config"] = config
                 account["updated_at"] = now.isoformat()
-                account["monitor"] = {"status": "data_error" if errors else "checked", "last_checked_at": now.isoformat(),
-                                      "quote_sources": {t: s for t, s in quotes["sources"].items() if t in watched or t == "SPX"}, "errors": errors}
+                account["monitor"] = {"status": "data_error" if errors else "trailing_error" if trailing_errors else "checked", "last_checked_at": now.isoformat(),
+                                      "quote_sources": {t: s for t, s in quotes["sources"].items() if t in watched or t == "SPX"},
+                                      "errors": errors, "trailing_errors": trailing_errors}
                 account["data_missing"] = sorted(t for t in watched if not bars.get(t))
                 if errors or account["data_missing"]:
                     account["data_stale"] = True
@@ -197,7 +290,7 @@ class ResearchService:
                 self.store.save_paper(account)
                 receipt["accounts"].append({"account_id": account["account_id"], "positions": len(account["positions"]),
                                             "trades": len(account["trades"]), "status": account["monitor"]["status"]})
-        receipt["status"] = "partial" if any(a["status"] == "data_error" for a in receipt["accounts"]) else "completed"
+        receipt["status"] = "partial" if any(a["status"] in ("data_error", "trailing_error") for a in receipt["accounts"]) else "completed"
         return receipt
 
     def paper(self, run_id, mode="replay", initial_cash=100000, risk_fraction=.0035, fee_bps=5, slippage_bps=5, profile_id=None,
@@ -275,8 +368,11 @@ class ResearchService:
                         if saved:
                             signal.update({k: saved[k] for k in ("stop", "target", "risk_plan", "source_run_id")})
                 ledger_config = _intraday_config(config)
-                result = apply_intraday(signals, {}, now=datetime.fromisoformat(utc_now().replace("Z", "+00:00")), config=ledger_config,
-                                        state=old["state"] if old else None, started_at=first_seen if old is None else None)
+                observed = utc_now()
+                policy = _account_trailing_policy(old, observed) if exit_mode == "structural" else None
+                result = apply_intraday(signals, {}, now=datetime.fromisoformat(observed.replace("Z", "+00:00")), config=ledger_config,
+                                        state=old["state"] if old else None, started_at=first_seen if old is None else None,
+                                        trailing_policy=policy)
                 result.update({"account_id": account_id, "run_id": run_id, "profile_id": profile_id, "source": run["source"],
                                "updated_at": utc_now(), "config": config, "automatic": True,
                                "validation_status": "forward_paper", "exit_mode": exit_mode,
