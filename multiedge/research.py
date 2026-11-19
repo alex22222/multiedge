@@ -112,9 +112,18 @@ class ResearchStore:
     def _save(self, kind, key, value, mutable=False):
         payload = encoded(value)
         with self._db() as db:
+            if kind == "paper":
+                db.execute("BEGIN IMMEDIATE")
             old = db.execute("SELECT payload FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
             if old and not mutable and old[0] != payload:
                 raise ValueError("已有版本不可覆盖，请创建新版本")
+            if old and kind == "paper":
+                previous = json.loads(old[0])
+                for saved, updated in ((previous, value), (previous.get("state", {}), value.get("state", {}))):
+                    history = saved.get("trades", [])
+                    next_trades = updated.get("trades", [])
+                    if history and (not isinstance(next_trades, list) or next_trades[:len(history)] != history):
+                        raise ValueError("历史平仓记录不可删除或修改；请保留原账户并使用新版本")
             db.execute("INSERT INTO records VALUES (?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET payload=excluded.payload", (kind, key, payload, utc_now()))
         return clean(value)
 

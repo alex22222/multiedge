@@ -839,7 +839,44 @@ function renderPaperAccounts() {
   const current = accounts.find((account) => account.account_id === $('paper-account-select').value);
   if (current) selectedPaper = current;
   else if (!accounts.length) selectedPaper = null;
+  renderPaperHistory();
   renderPaper();
+}
+
+function renderPaperHistory() {
+  const mode = $('paper-history-mode').value;
+  const accounts = (workspace.paper_accounts || []).map(paperLedger).filter((account) => account.mode === mode);
+  const rows = accounts.flatMap((account) => (account.trades || []).map((trade) => ({ account, trade })));
+  rows.sort((a, b) => String(b.trade.exit_timestamp || b.trade.exit_date).localeCompare(String(a.trade.exit_timestamp || a.trade.exit_date)) || a.trade.ticker.localeCompare(b.trade.ticker));
+  $('paper-history-count').textContent = `${accounts.length} 个账户 · ${rows.length} 笔已平仓交易`;
+  const body = $('paper-history-body');
+  body.replaceChildren();
+  for (const { account, trade } of rows) {
+    const tr = node('tr');
+    const source = node('td', 'cell-note', paperPlan(account).label);
+    source.append(node('small', 'check-detail', account.automation_disabled ? '已停用账户 · 原记录保留' : humanStatus(account.mode)));
+    const pnl = paperPnlCell(trade.net_pnl);
+    if (numeric(trade.realized_r)) pnl.append(node('small', 'check-detail', `按初始风险 ${fmt(trade.realized_r)}R`));
+    const action = node('td');
+    const button = node('button', 'paper-history-open', '查看原账户');
+    button.type = 'button';
+    button.setAttribute('aria-label', `查看 ${trade.ticker} 的原账户与每日盈亏`);
+    button.addEventListener('click', () => {
+      $('paper-account-select').value = account.account_id;
+      $('paper-account-select').dispatchEvent(new Event('change'));
+      $('paper-account-select').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    action.append(button);
+    tr.append(paperTickerCell(trade), source,
+      paperPriceCell(trade.entry_price, trade.entry_timestamp || trade.entry_date),
+      paperPriceCell(trade.exit_price, trade.exit_timestamp || trade.exit_date),
+      node('td', 'cell-note', paperLabels[trade.exit_reason] || trade.exit_reason || '未提供'), pnl, action);
+    body.append(tr);
+  }
+  $('paper-history-empty').hidden = rows.length > 0;
+  $('paper-history-empty').textContent = mode === 'forward'
+    ? '所有前向账户尚无已平仓交易；未成交候选与仍在持有的股票不会记作平仓。'
+    : '尚无历史回放的平仓记录。';
 }
 
 function renderPaper() {
@@ -906,7 +943,7 @@ function renderPaper() {
     $('paper-positions-body').append(tr);
   }
   $('paper-positions-empty').hidden = positions.length > 0;
-  $('paper-trade-note').textContent = `${trades.length} 笔完成交易 · 净损益已扣买卖费用`;
+  $('paper-trade-note').textContent = `当前账户 ${trades.length} 笔完成交易 · 净损益已扣买卖费用`;
   $('paper-trades-body').replaceChildren();
   for (const trade of [...trades].reverse()) {
     const tr = node('tr');
@@ -1300,6 +1337,7 @@ $('paper-form').addEventListener('submit', async (event) => {
 });
 $('paper-exit-mode').addEventListener('change', renderPaperFormPlan);
 for (const name of ['mode', 'strategy_version']) $('paper-form').elements[name].addEventListener('change', renderPaperFormPlan);
+$('paper-history-mode').addEventListener('change', renderPaperHistory);
 for (const id of ['paper-pnl-ticker', 'paper-pnl-date']) $(id).addEventListener('change', () => renderPaperDailyPnl(paperLedger(selectedPaper)));
 for (const name of ['stop_loss_percent', 'take_profit_percent']) $('paper-form').elements[name].addEventListener('input', renderPaperFormPlan);
 $('paper-account-select').addEventListener('change', async () => {
